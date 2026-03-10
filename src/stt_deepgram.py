@@ -98,16 +98,16 @@ async def transcribe_stream(audio_chunks: AsyncIterator[bytes]) -> AsyncIterator
 
 def test_connection() -> bool:
     """Verify Deepgram API key is valid."""
-    import requests
     if not DEEPGRAM_API_KEY:
         log.error("DEEPGRAM_API_KEY not set")
         return False
     try:
-        resp = requests.get(
-            "https://api.deepgram.com/v1/projects",
-            headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
-            timeout=5
-        )
+        with httpx.Client() as client:
+            resp = client.get(
+                "https://api.deepgram.com/v1/projects",
+                headers={"Authorization": f"Token {DEEPGRAM_API_KEY}"},
+                timeout=5
+            )
         ok = resp.status_code == 200
         log.info(f"Deepgram connection: {'✅' if ok else '❌'} ({resp.status_code})")
         return ok
