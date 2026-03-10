@@ -1,0 +1,64 @@
+version: "3.9"
+
+# Phone Bridge — Docker Compose
+# Manages Asterisk SIP server + SMS gateway Flask server
+#
+# Usage:
+#   docker compose up -d          # start all services
+#   docker compose logs -f        # tail logs
+#   docker compose down           # stop all
+#
+# Requires: .env file (copy from .env.example and fill in)
+
+services:
+
+  # ── Asterisk SIP Server ────────────────────────────────────────────────────
+  asterisk:
+    image: andrius/asterisk:latest
+    container_name: asterisk-bridge
+    restart: unless-stopped
+    network_mode: host          # required for SIP/RTP (port negotiation)
+    environment:
+      ASTERISK_SIP_SECRET: ${ASTERISK_SIP_SECRET:-phonebridge123}
+      ASTERISK_MANAGER_SECRET: ${ASTERISK_MANAGER_SECRET:-phonebridge123}
+    volumes:
+      - ./config/asterisk:/etc/asterisk:ro
+      - asterisk-logs:/var/log/asterisk
+    healthcheck:
+      test: ["CMD", "asterisk", "-rx", "core show uptime"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # ── SMS Gateway Flask Server ───────────────────────────────────────────────
+  sms-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: sms-gateway
+    restart: unless-stopped
+    ports:
+      - "${SERVER_PORT:-3001}:3001"
+    environment:
+      PHONE_IP: ${PHONE_IP:-}
+      PHONE_PORT: ${PHONE_PORT:-8080}
+      SMS_GATEWAY_USER: ${SMS_GATEWAY_USER:-user}
+      SMS_GATEWAY_PASS: ${SMS_GATEWAY_PASS:-password}
+      SERVER_PORT: "3001"
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-claude-haiku-4-5}
+      AI_MAX_TOKENS: ${AI_MAX_TOKENS:-256}
+    volumes:
+      - ./src:/app/src:ro
+    depends_on:
+      asterisk:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3001/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  asterisk-logs:
