@@ -1,5 +1,15 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — Route AI through Jarvis session
+
+**Author:** Jarvis  
+**Type:** Feature
+
+### Changes
+- `src/ai_handler.py`: switched AI model from `anthropic/claude-sonnet-4-5` to `openclaw:jarvis`
+- All inbound SMS and voice calls now route through Jarvis's OpenClaw session
+- Confirmed working: test SMS reply came from Jarvis persona
+
 ## 2026-03-09 — Phase 1 SMS Setup (Issue #7)
 
 **Author:** Friday  
