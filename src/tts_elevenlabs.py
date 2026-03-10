@@ -16,9 +16,6 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Rachel (default)
 ELEVENLABS_MODEL    = os.getenv("ELEVENLABS_MODEL", "eleven_turbo_v2")  # Lowest latency model
 
-ELEVENLABS_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
-
-
 def synthesize(text: str, output_path: str | None = None) -> str:
     """
     Convert text to speech via ElevenLabs.
@@ -27,6 +24,10 @@ def synthesize(text: str, output_path: str | None = None) -> str:
     """
     if not ELEVENLABS_API_KEY:
         raise ValueError("ELEVENLABS_API_KEY not set")
+
+    # Build URL inside function so runtime env var changes take effect
+    voice_id = os.getenv("ELEVENLABS_VOICE_ID", ELEVENLABS_VOICE_ID)
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
 
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
@@ -44,7 +45,7 @@ def synthesize(text: str, output_path: str | None = None) -> str:
         },
     }
 
-    resp = requests.post(ELEVENLABS_URL, headers=headers, json=body, timeout=15)
+    resp = requests.post(url, headers=headers, json=body, timeout=15)
     resp.raise_for_status()
 
     if output_path is None:

@@ -81,22 +81,18 @@ async def transcribe_stream(audio_chunks: AsyncIterator[bytes]) -> AsyncIterator
                 await ws.send(chunk)
             await ws.send(b"")  # EOF signal
 
-        async def receiver():
-            async for message in ws:
-                import json
-                data = json.loads(message)
-                if data.get("type") == "Results":
-                    transcript = (
-                        data.get("channel", {})
-                            .get("alternatives", [{}])[0]
-                            .get("transcript", "")
-                    )
-                    if transcript.strip():
-                        yield transcript
-
         sender_task = asyncio.create_task(sender())
-        async for transcript in receiver():
-            yield transcript
+        async for message in ws:
+            import json
+            data = json.loads(message)
+            if data.get("type") == "Results":
+                transcript = (
+                    data.get("channel", {})
+                        .get("alternatives", [{}])[0]
+                        .get("transcript", "")
+                )
+                if transcript.strip():
+                    yield transcript
         await sender_task
 
 

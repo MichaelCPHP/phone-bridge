@@ -145,7 +145,7 @@ def run_agi():
     for turn in range(10):  # max 10 turns per call
         # Record caller utterance
         rec_file = f"/tmp/rec_{call_id}_{turn}"
-        print(f"EXEC Record {rec_file}.wav|3|30")  # 3s silence timeout, 30s max
+        print(f"EXEC Record {rec_file}.wav,3,30")  # 3s silence timeout, 30s max
         sys.stdout.flush()
         sys.stdin.readline()
 
