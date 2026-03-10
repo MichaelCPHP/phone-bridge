@@ -2,6 +2,7 @@ flask>=3.0.0
 requests>=2.31.0
 httpx>=0.27.0
 websockets>=12.0
-anthropic>=0.20.0
-deepgram-sdk>=3.0.0
-elevenlabs>=1.0.0
+# NOTE: No Anthropic, Deepgram, or ElevenLabs — fully local stack
+# STT: Voicebox /transcribe (Whisper 0.6B, localhost:17493)
+# TTS: Voicebox /generate Jarvis profile (localhost:17493) + macOS say fallback
+# AI:  Ollama llama3.2 (localhost:11434)
