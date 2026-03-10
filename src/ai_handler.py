@@ -19,7 +19,7 @@ log = logging.getLogger("ai-handler")
 
 OPENCLAW_URL   = os.getenv("OPENCLAW_URL",   "http://localhost:18789")
 OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91")
-AI_MODEL       = os.getenv("AI_MODEL",       "anthropic/claude-sonnet-4-5")
+AI_MODEL       = os.getenv("AI_MODEL",       "openclaw:jarvis")
 MAX_TOKENS     = int(os.getenv("AI_MAX_TOKENS", "256"))
 
 SYSTEM_PROMPT = """You are Jarvis, Michael's personal AI assistant managing his phone — SMS and calls.
