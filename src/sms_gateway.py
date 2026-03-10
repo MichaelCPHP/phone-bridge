@@ -135,8 +135,10 @@ def sms_webhook():
     except Exception:
         return jsonify({"error": "bad JSON"}), 400
 
-    sender = data.get("phoneNumber") or data.get("from") or data.get("sender") or ""
-    body   = data.get("message")    or data.get("body")  or data.get("text")   or ""
+    # android-sms-gateway wraps payload under "payload" key
+    payload = data.get("payload", data)
+    sender = payload.get("phoneNumber") or payload.get("sender") or payload.get("from") or data.get("phoneNumber") or data.get("sender") or ""
+    body   = payload.get("message")    or payload.get("body")   or payload.get("text")  or data.get("message")    or data.get("body")   or ""
 
     if not sender or not body:
         log.warning(f"Webhook missing sender/body: {data}")
