@@ -1,5 +1,15 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — MMS group reply via ADB UIAutomator
+
+**Author:** Friday
+
+- send_mms_via_adb(): SENDTO mmsto: intent + UIAutomator tap Send button
+- Validated: Send MMS button at [912,2346][1059,2493], tap worked, mms_id=216 confirmed sent
+- send_group_reply() now tries UIAutomator first, falls back to individual SMS
+- send_imessage_to_chat() handles iMessage groups via --chat-id
+
+
 ## 2026-03-10 — iMessage group chat reply via chat_id
 
 **Author:** Friday

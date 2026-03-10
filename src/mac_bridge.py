@@ -352,11 +352,92 @@ def get_mms_all_participants(mms_id: int) -> list[str]:
     return participants
 
 
-def send_group_reply(participants: list[str], text: str) -> bool:
-    """Send reply to all group participants via gateway API."""
-    import requests
+def send_mms_via_adb(participants: list[str], text: str) -> bool:
+    """Send MMS group reply via ADB UIAutomator: open thread → pre-fill → tap Send.
+    
+    Uses SENDTO mmsto: intent to open Google Messages with recipients + body,
+    then UIAutomator to find and tap the Send button.
+    Validated: works on Motorola Razr 2024, Android 16, Google Messages.
+    """
     if not participants:
         return False
+
+    # Format recipients for mmsto: intent
+    recipients_str = ','.join(
+        ('+1' + p if len(p) == 10 and not p.startswith('+') else p)
+        for p in participants
+    )
+
+    try:
+        # Step 1: Open Google Messages with pre-filled recipients + body
+        rc1, out1 = adb(
+            "shell", "am", "start",
+            "-a", "android.intent.action.SENDTO",
+            "-d", f"mmsto:{recipients_str}",
+            "--es", "sms_body", text[:160],
+            timeout=8
+        )
+        if rc1 != 0:
+            log.error(f"send_mms SENDTO failed: {out1}")
+            return False
+
+        import time
+        time.sleep(2)  # wait for UI to render
+
+        # Step 2: Dump UI hierarchy and find Send button
+        adb("shell", "uiautomator", "dump", "/sdcard/ui.xml", timeout=8)
+        rc2, xml = adb("shell", "cat", "/sdcard/ui.xml", timeout=5)
+        if rc2 != 0:
+            log.error("send_mms: failed to read UI XML")
+            return False
+
+        # Step 3: Parse bounds of Send/Send MMS button
+        import re, xml.etree.ElementTree as ET
+        try:
+            tree = ET.fromstring(xml)
+        except ET.ParseError as e:
+            log.error(f"send_mms: XML parse error: {e}")
+            return False
+
+        send_bounds = None
+        for node in tree.iter():
+            desc = node.get('content-desc', '')
+            text_attr = node.get('text', '')
+            if any(k in (desc + text_attr).lower() for k in ['send sms', 'send mms', 'send message']):
+                bounds_str = node.get('bounds', '')
+                m = re.match(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', bounds_str)
+                if m:
+                    x = (int(m.group(1)) + int(m.group(3))) // 2
+                    y = (int(m.group(2)) + int(m.group(4))) // 2
+                    send_bounds = (x, y)
+                    break
+
+        if not send_bounds:
+            log.error("send_mms: Send button not found in UI")
+            return False
+
+        # Step 4: Tap Send button
+        rc3, _ = adb("shell", "input", "tap", str(send_bounds[0]), str(send_bounds[1]), timeout=5)
+        if rc3 != 0:
+            log.error("send_mms: tap failed")
+            return False
+
+        log.info(f"MMS sent to group {participants} via UIAutomator tap at {send_bounds}")
+        return True
+
+    except Exception as e:
+        log.error(f"send_mms_via_adb error: {e}")
+        return False
+
+
+def send_group_reply(participants: list[str], text: str) -> bool:
+    """Send MMS reply to group thread via ADB, fallback to individual SMS gateway."""
+    # Try MMS via UIAutomator first (replies in-thread)
+    if send_mms_via_adb(participants, text):
+        return True
+    # Fallback: individual SMS to each participant (not in-thread)
+    import requests
+    log.warning("MMS UIAutomator failed, falling back to individual SMS")
     try:
         r = requests.post(
             f"http://{PHONE_IP}:{PHONE_PORT}/messages",
@@ -365,10 +446,10 @@ def send_group_reply(participants: list[str], text: str) -> bool:
             timeout=10,
         )
         r.raise_for_status()
-        log.info(f"Group reply → {participants}: queued")
+        log.info(f"Fallback SMS → {participants}: queued")
         return True
     except Exception as e:
-        log.error(f"send_group_reply error: {e}")
+        log.error(f"send_group_reply fallback error: {e}")
         return False
 
 
