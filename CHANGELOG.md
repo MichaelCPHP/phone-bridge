@@ -1,5 +1,17 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — sms_gateway.py clean rebuild
+
+**Author:** Friday
+
+- No subprocess, no --json flag — direct HTTP to OpenClaw
+- Rate limit: 1 reply per sender per 60s
+- Dedup: ignore duplicate bodies within 30s  
+- 160 char cap on all replies
+- Markdown stripped from AI output
+- Tested: simulated webhook → AI reply → SMS sent ✅
+
+
 ## 2026-03-10 — Fix SMS spam bug
 
 **Author:** Jarvis  
