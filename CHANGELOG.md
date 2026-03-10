@@ -1,5 +1,17 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — Fix SMS spam bug
+
+**Author:** Jarvis  
+**Type:** Bugfix
+
+### Changes
+- sms_gateway.py: safely extract only text content from OpenClaw response (prevent raw JSON being sent as SMS)
+- sms_gateway.py: hard 320-char limit on all SMS replies
+- run.sh: replaced dangerous UI-tap send method with android-sms-gateway REST API
+- run.sh: switched model to openclaw:jarvis with explicit no-markdown instruction
+
+
 ## 2026-03-10 — Route AI through Jarvis session
 
 **Author:** Jarvis  
