@@ -49,25 +49,33 @@ def send_sms(phone_number: str, message: str) -> dict:
 
 
 def route_to_jarvis(sender: str, message: str, channel: str = "SMS") -> str:
-    """Route message to Jarvis agent via `openclaw agent` CLI and return reply."""
-    prompt = f"[Inbound {channel} from {sender}]: {message}\n\nReply concisely (1-3 sentences for SMS). Do not include any preamble."
+    """Route message to Jarvis session via `openclaw agent` CLI and return reply."""
+    prompt = f"[Inbound {channel} from {sender}]: {message}\n\nReply concisely (1-3 sentences for SMS). No preamble."
     try:
         result = subprocess.run(
-            ["openclaw", "agent", "--agent", "jarvis", "--message", prompt, "--json"],
+            ["openclaw", "agent",
+             "--session-id", "d80fe68e-5094-426f-aee5-5f1a0cf48d47",
+             "--message", prompt, "--json"],
             capture_output=True, text=True, timeout=90,
             env={**os.environ, "PATH": "/Users/michaeltgcm/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
         )
         if result.returncode == 0 and result.stdout.strip():
             try:
                 data = json.loads(result.stdout.strip())
-                reply = data.get("reply") or data.get("response") or data.get("content") or data.get("message", "")
+                # Extract clean text from payloads array
+                payloads = data.get("payloads", [])
+                if payloads and isinstance(payloads, list):
+                    reply = payloads[0].get("text", "").strip()
+                    if reply:
+                        log.info(f"Jarvis replied: {reply[:80]}")
+                        return reply
+                # Fallback fields
+                reply = data.get("reply") or data.get("response") or data.get("content") or ""
                 if reply:
-                    log.info(f"Jarvis replied via CLI: {reply[:80]}")
-                    return reply
+                    return reply.strip()
             except json.JSONDecodeError:
-                # Plain text output
                 reply = result.stdout.strip()
-                if reply and len(reply) > 5:
+                if reply and len(reply) > 5 and not reply.startswith("{"):
                     log.info(f"Jarvis replied (plain): {reply[:80]}")
                     return reply
         if result.stderr:
