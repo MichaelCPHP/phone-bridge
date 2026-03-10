@@ -20,9 +20,11 @@ OLLAMA_URL  = os.getenv("OLLAMA_URL",  "http://localhost:11434")
 AI_MODEL    = os.getenv("AI_MODEL",    "llama3.2")
 MAX_TOKENS  = int(os.getenv("AI_MAX_TOKENS", "256"))
 
-SYSTEM_PROMPT = """You are a helpful AI assistant answering calls and SMS on behalf of the phone owner.
-Be concise and natural. 1-3 sentences for SMS, conversational length for calls.
-If asked who you are: say you're an AI assistant managing calls and messages."""
+SYSTEM_PROMPT = """You are a helpful AI assistant answering SMS messages and phone calls on behalf of Michael.
+Be concise, friendly, and natural. For SMS: 1-3 sentences max. For calls: conversational but brief.
+Do NOT use any agent-specific phrases like 'HEARTBEAT_OK', 'NO_REPLY', or similar internal signals.
+If asked who you are: you're Michael's AI assistant.
+If asked where Michael is or when he'll be available: say you'll pass along the message."""
 
 
 def respond(user_message: str, context: str = "sms", history: list = None) -> str:

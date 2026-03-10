@@ -131,6 +131,68 @@ def save_last_message_id(msg_id: int):
     LAST_ID_FILE.write_text(str(msg_id))
 
 
+def get_sms_from_notifications() -> list[dict]:
+    """
+    Read incoming SMS from Android notification dump.
+    Works even when Google Messages doesn't write to content://sms.
+    Returns list of {notif_id, address, body} dicts.
+    """
+    import re as _re
+    code, content = adb("shell", "dumpsys", "notification", "--noredact", timeout=15)
+    if code != 0:
+        return []
+
+    results = []
+    blocks = content.split("NotificationRecord(")
+    for block in blocks:
+        if "com.google.android.apps.messaging" not in block:
+            continue
+        if "android.messages" not in block:
+            continue
+
+        # Get notification ID for dedup
+        key_m = _re.search(r'incoming_message:(\d+)', block)
+        notif_id = int(key_m.group(1)) if key_m else -1
+
+        # Extract sender + text from Bundle entries
+        msg_blocks = _re.findall(
+            r'sender=([^,\n]+).*?text=([^\n,}]+)',
+            block, _re.DOTALL
+        )
+        for sender, text in msg_blocks:
+            sender = sender.strip()
+            text = text.strip()
+            if sender and text:
+                results.append({
+                    "notif_id": notif_id,
+                    "address": _re.sub(r'[\s\(\)\-]', '', sender),
+                    "body": text,
+                })
+    return results
+
+
+_seen_notif_ids: set = set()
+SEEN_IDS_FILE = Path("/tmp/sms_seen_notif_ids.txt")
+
+
+def load_seen_ids():
+    global _seen_notif_ids
+    try:
+        _seen_notif_ids = set(int(x) for x in SEEN_IDS_FILE.read_text().split() if x.strip())
+    except Exception:
+        _seen_notif_ids = set()
+
+
+def save_seen_id(notif_id: int):
+    _seen_notif_ids.add(notif_id)
+    SEEN_IDS_FILE.write_text("\n".join(str(i) for i in _seen_notif_ids))
+
+
+def dismiss_notification(notif_id: int):
+    """Dismiss a Google Messages notification after processing."""
+    shell(f"service call notification 1 i32 {notif_id}", timeout=5)
+
+
 def get_new_incoming_sms(since_id: int) -> list[dict]:
     """
     Query the SMS database for new incoming messages since `since_id`.
@@ -147,15 +209,27 @@ def get_new_incoming_sms(since_id: int) -> list[dict]:
 
     messages = []
     current = {}
+    last_key = None
     for line in out.splitlines():
-        line = line.strip()
-        if line.startswith("Row:"):
+        stripped = line.strip()
+        if stripped.startswith("Row:"):
             if current:
                 messages.append(current)
             current = {}
-        elif "=" in line:
-            key, _, val = line.partition("=")
-            current[key.strip()] = val.strip()
+            last_key = None
+        elif "=" in stripped and not stripped.startswith("http"):
+            # Check if this looks like a key=value line (key has no spaces)
+            key, _, val = stripped.partition("=")
+            key = key.strip()
+            if key and " " not in key and key.isidentifier() or key.startswith("_"):
+                current[key] = val.strip()
+                last_key = key
+            elif last_key and last_key == "body":
+                # continuation of multi-line body
+                current["body"] = current.get("body", "") + "\n" + stripped
+        elif last_key == "body" and stripped:
+            # multi-line body continuation
+            current["body"] = current.get("body", "") + "\n" + stripped
     if current:
         messages.append(current)
 
@@ -187,12 +261,21 @@ def poll_loop():
     # Seed last id so we don't reply to old messages
     last_id = get_last_message_id()
     if last_id == 0:
-        msgs = get_new_incoming_sms(0)
-        last_id = max((m["id"] for m in msgs), default=0)
+        # Query max id directly — more reliable than parsing full message list
+        _, out = shell("content query --uri content://sms/inbox --projection _id --sort '_id DESC'")
+        for line in out.splitlines():
+            if "_id=" in line:
+                try:
+                    candidate = int(line.split("_id=")[1].split(",")[0].split()[0])
+                    last_id = max(last_id, candidate)
+                except Exception:
+                    pass
+                break  # only need the first (highest) row
         save_last_message_id(last_id)
         log.info(f"Seeded last SMS id: {last_id}")
 
-    log.info(f"Watching for new SMS (after id={last_id})...")
+    load_seen_ids()
+    log.info(f"Watching for new SMS (content provider id > {last_id} + notification monitor)")
 
     while True:
         try:
@@ -201,9 +284,25 @@ def poll_loop():
                 time.sleep(5)
                 continue
 
+            # Primary: notification-based (works with Google Messages 12+)
+            notif_msgs = get_sms_from_notifications()
+            for msg in notif_msgs:
+                nid = msg.get("notif_id", -1)
+                if nid in _seen_notif_ids:
+                    continue
+                log.info(f"📩 [notif] SMS from {msg['address']}: {msg['body']!r}")
+                try:
+                    reply = handle_sms(msg["address"], msg["body"])
+                    log.info(f"🤖 Replying: {reply!r}")
+                    send_sms(msg["address"], reply)
+                except Exception as e:
+                    log.error(f"AI/send error: {e}")
+                save_seen_id(nid)
+
+            # Fallback: content provider (works on older Android / non-Google Messages)
             new_msgs = get_new_incoming_sms(last_id)
             for msg in new_msgs:
-                log.info(f"📩 SMS from {msg['address']}: {msg['body']!r}")
+                log.info(f"📩 [db] SMS from {msg['address']}: {msg['body']!r}")
                 try:
                     reply = handle_sms(msg["address"], msg["body"])
                     log.info(f"🤖 Replying: {reply!r}")
