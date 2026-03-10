@@ -1,223 +1,367 @@
 #!/usr/bin/env python3
 """
-Mac Bridge — unified iMessage + SMS AI responder.
-Phone = modem only. All logic on Mac.
+mac_bridge.py — Unified Mac-side phone bridge.
 
-Channels:
-  iMessage/SMS from iPhones: imsg CLI (Mac Messages.app)
-  SMS from Android/others:   android-sms-gateway REST API
+Handles ALL inbound messages from one place:
+  - iMessage/SMS via imsg CLI (watches Mac Messages.app chat.db)
+  - Android SMS via ADB content://sms poll (fallback/non-Apple senders)
+
+Replies via:
+  - imsg send (iMessage/SMS for Apple contacts)
+  - SMS Gateway API (Android gateway for non-Apple)
+
+Architecture: Phone = modem. Mac = everything.
+
+Usage:
+    python3 src/mac_bridge.py
+    python3 src/mac_bridge.py --test-imsg   # test iMessage reply to a number
+    python3 src/mac_bridge.py --status       # show current state
 """
 
+import argparse
 import json
 import logging
 import os
+import re
 import subprocess
-import threading
+import sys
 import time
+import threading
 from datetime import datetime, timezone
+from typing import Optional
 
-import httpx
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
 log = logging.getLogger("mac-bridge")
 
-# ── Config ─────────────────────────────────────────────────────────────────
-OPENCLAW_URL   = os.getenv("OPENCLAW_URL", "http://localhost:18789/v1/chat/completions")
-OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91")
-GATEWAY_URL    = os.getenv("GATEWAY_URL", "http://192.168.1.40:8080")
-GATEWAY_USER   = os.getenv("SMS_GATEWAY_USER", "sms")
-GATEWAY_PASS   = os.getenv("SMS_GATEWAY_PASS", "smspass1")
-POLL_SEC       = int(os.getenv("POLL_SEC", "5"))
+# ── Config ────────────────────────────────────────────────────────────────────
+PHONE_IP      = os.getenv("PHONE_IP",       "192.168.1.40")
+PHONE_PORT    = os.getenv("PHONE_PORT",     "8080")
+SMS_USER      = os.getenv("SMS_USER",       "sms")
+SMS_PASS      = os.getenv("SMS_PASS",       "smspass1")
+ADB_SERIAL    = os.getenv("ADB_SERIAL",     "ZY22K45948")
+OPENCLAW_URL  = os.getenv("OPENCLAW_URL",   "http://localhost:18789")
+OPENCLAW_TOKEN= os.getenv("OPENCLAW_TOKEN", "dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91")
+AI_MODEL      = os.getenv("AI_MODEL",       "anthropic/claude-haiku-4-5")
+IMSG_BIN      = os.getenv("IMSG_BIN",       "/opt/homebrew/bin/imsg")
+MY_ANDROID    = "+17029469526"   # The Android phone number
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "3"))
 
-# Track processed message IDs to avoid double-replies
-_seen_ids: set = set()
-_seen_lock = threading.Lock()
+# Per-sender conversation history for AI context
+_histories: dict[str, list[dict]] = {}
+_lock = threading.Lock()
 
 
-def get_ai_reply(sender: str, message: str, channel: str = "SMS") -> str:
-    """Call OpenClaw AI for a reply."""
+# ── AI ────────────────────────────────────────────────────────────────────────
+
+def get_ai_reply(sender: str, text: str) -> Optional[str]:
+    """Get Claude reply via OpenClaw gateway, maintaining per-sender history."""
+    import requests
+    with _lock:
+        history = _histories.get(sender, [])
+
+    messages = [
+        {"role": "system", "content": (
+            "You are a helpful AI phone assistant. "
+            "Reply concisely — 1-3 sentences max. No markdown. "
+            "You receive SMS and iMessages on behalf of your owner."
+        )}
+    ] + history + [{"role": "user", "content": text}]
+
     try:
-        resp = httpx.post(
-            OPENCLAW_URL,
-            headers={"Authorization": f"Bearer {OPENCLAW_TOKEN}"},
-            json={
-                "model": "openclaw:main",
-                "messages": [
-                    {"role": "system", "content": (
-                        f"You are Jarvis, Michael's personal AI phone assistant. "
-                        f"You handle Michael's {channel} messages. Be concise and friendly, max 160 chars for SMS. "
-                        f"If asked who you are: say you're Jarvis, Michael's AI phone assistant. "
-                        f"Never mention Builder, Scout, Analyst, or coding boards."
-                    )},
-                    {"role": "user", "content": message},
-                ],
-                "max_tokens": 150,
-            },
+        r = requests.post(
+            f"{OPENCLAW_URL}/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENCLAW_TOKEN}",
+                     "Content-Type": "application/json"},
+            json={"model": AI_MODEL, "max_tokens": 150, "messages": messages},
             timeout=30,
         )
-        return resp.json()["choices"][0]["message"]["content"].strip()
+        r.raise_for_status()
+        reply = r.json()["choices"][0]["message"]["content"].strip()
+        with _lock:
+            h = _histories.get(sender, [])
+            h = h + [{"role": "user", "content": text},
+                     {"role": "assistant", "content": reply}]
+            _histories[sender] = h[-20:]
+        return reply
     except Exception as e:
         log.error(f"AI error: {e}")
-        return "Sorry, I'm having trouble responding right now."
+        return None
 
 
-# ── iMessage thread via imsg ────────────────────────────────────────────────
+# ── iMessage send ─────────────────────────────────────────────────────────────
 
-def imsg_send(to: str, text: str) -> bool:
-    """Send via imsg CLI."""
+def send_imessage(to: str, text: str, service: str = "auto") -> bool:
+    """Send iMessage or SMS via imsg CLI."""
     try:
         result = subprocess.run(
-            ["imsg", "send", "--to", to, "--text", text],
+            [IMSG_BIN, "send", "--to", to, "--text", text, "--service", service],
             capture_output=True, text=True, timeout=15
         )
-        return result.returncode == 0
+        if result.returncode == 0:
+            log.info(f"imsg → {to}: sent ({service})")
+            return True
+        log.error(f"imsg send failed: {result.stderr.strip()}")
+        return False
     except Exception as e:
-        log.error(f"imsg send failed: {e}")
+        log.error(f"imsg send error: {e}")
         return False
 
 
-def imsg_watcher():
-    """Watch Mac Messages.app for new iMessages/SMS via imsg."""
-    log.info("📱 iMessage watcher starting...")
+# ── SMS Gateway send ──────────────────────────────────────────────────────────
+
+def send_sms_gateway(number: str, text: str) -> bool:
+    """Send SMS via Android gateway Wi-Fi API."""
+    import requests
     try:
-        # Get recent chats to initialize
-        result = subprocess.run(
-            ["imsg", "chats", "--limit", "20", "--json"],
-            capture_output=True, text=True, timeout=10
+        r = requests.post(
+            f"http://{PHONE_IP}:{PHONE_PORT}/messages",
+            auth=(SMS_USER, SMS_PASS),
+            json={"message": text, "phoneNumbers": [number]},
+            timeout=10,
         )
-        if result.returncode != 0:
-            log.warning(f"imsg chats failed: {result.stderr[:200]}")
-            log.warning("iMessage watcher disabled — grant Full Disk Access to Terminal in System Settings")
-            return
-
-        chats = [json.loads(line) for line in (result.stdout or "").strip().splitlines() if line.strip()]
-        # Track last message ID per chat
-        last_ids: dict = {}
-        for chat in chats:
-            last_ids[chat.get("chatId")] = chat.get("lastMessageId", 0)
-
-        log.info(f"✅ Watching {len(chats)} iMessage chats")
-
-        while True:
-            time.sleep(POLL_SEC)
-            for chat in chats:
-                chat_id = chat.get("chatId")
-                try:
-                    hist = subprocess.run(
-                        ["imsg", "history", "--chat-id", str(chat_id), "--limit", "3", "--json"],
-                        capture_output=True, text=True, timeout=10
-                    )
-                    if hist.returncode != 0:
-                        continue
-                    messages = [json.loads(line) for line in (hist.stdout or "").strip().splitlines() if line.strip()]
-                    for msg in messages:
-                        msg_id = msg.get("messageId") or msg.get("id")
-                        is_from_me = msg.get("isFromMe", False)
-                        text = msg.get("text") or msg.get("body") or ""
-                        sender = msg.get("sender") or msg.get("handle") or chat.get("displayName", "unknown")
-
-                        if is_from_me or not text or not msg_id:
-                            continue
-
-                        with _seen_lock:
-                            if msg_id in _seen_ids:
-                                continue
-                            _seen_ids.add(msg_id)
-
-                        if last_ids.get(chat_id, 0) and msg_id <= last_ids.get(chat_id, 0):
-                            continue
-
-                        log.info(f"[iMessage] {sender}: {text[:80]}")
-                        reply = get_ai_reply(sender, text, "iMessage")
-                        log.info(f"[iMessage] → {reply[:80]}")
-                        imsg_send(sender, reply)
-                        last_ids[chat_id] = msg_id
-
-                except Exception as e:
-                    log.debug(f"Chat {chat_id} error: {e}")
-
+        r.raise_for_status()
+        msg_id = r.json().get("id")
+        for _ in range(15):
+            time.sleep(1)
+            s = requests.get(
+                f"http://{PHONE_IP}:{PHONE_PORT}/messages/{msg_id}",
+                auth=(SMS_USER, SMS_PASS), timeout=5
+            ).json()
+            state = s.get("state", "")
+            if state in ("Delivered", "Sent"):
+                log.info(f"gateway → {number}: {state}")
+                return True
+            if state == "Failed":
+                log.error(f"gateway → {number}: Failed")
+                return False
+        return True
     except Exception as e:
-        log.error(f"iMessage watcher error: {e}")
+        log.error(f"send_sms_gateway error: {e}")
+        return False
 
 
-# ── SMS gateway poller ──────────────────────────────────────────────────────
+def send_reply(sender: str, text: str, service: str = "auto") -> bool:
+    """Send reply via best available path."""
+    # iMessage path handles both iMessage and SMS for Apple contacts
+    if send_imessage(sender, text, service=service):
+        return True
+    # Fallback: Android gateway
+    log.warning(f"imsg failed, trying gateway for {sender}")
+    return send_sms_gateway(sender, text)
 
-def gateway_sms_poller():
-    """Poll android-sms-gateway for new inbound SMS."""
-    log.info("📲 SMS gateway poller starting...")
-    last_check = datetime.now(timezone.utc)
+
+# ── iMessage watcher ──────────────────────────────────────────────────────────
+
+def handle_imsg_message(msg: dict) -> None:
+    """Process one message from imsg watch."""
+    # Skip outbound messages (is_from_me=true)
+    if msg.get("is_from_me") or msg.get("isFromMe"):
+        return
+
+    sender = msg.get("sender") or msg.get("handle") or msg.get("address") or ""
+    text   = msg.get("text") or msg.get("body") or ""
+    service = msg.get("service", "auto")
+
+    if not sender or not text:
+        return
+
+    log.info(f"📨 iMsg [{service}] from {sender}: {text[:60]}")
+
+    reply = get_ai_reply(sender, text)
+    if not reply:
+        log.warning("No AI reply")
+        return
+
+    log.info(f"  ↳ AI: {reply[:80]}")
+    send_reply(sender, reply, service=service)
+
+
+def watch_imessages() -> None:
+    """Stream incoming iMessages/SMS from Mac Messages.app via imsg watch."""
+    log.info("Starting imsg watcher...")
+    while True:
+        try:
+            proc = subprocess.Popen(
+                [IMSG_BIN, "watch", "--json"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            log.info("✅ imsg watch: streaming")
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                    handle_imsg_message(msg)
+                except json.JSONDecodeError:
+                    pass  # non-JSON line, skip
+            proc.wait()
+            log.warning("imsg watch exited, restarting in 5s...")
+        except Exception as e:
+            log.error(f"imsg watch error: {e}")
+        time.sleep(5)
+
+
+# ── ADB SMS poller ────────────────────────────────────────────────────────────
+
+def adb(*args, timeout: int = 15) -> tuple[int, str]:
+    cmd = ["adb", "-s", ADB_SERIAL] + list(args)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, (r.stdout + r.stderr).strip()
+
+
+def get_sms_since(last_id: int) -> list[dict]:
+    """Read new received SMS (type=1) from content://sms via ADB."""
+    rc, out = adb("shell", "content", "query", "--uri", "content://sms", timeout=10)
+    if rc != 0:
+        return []
+    msgs = []
+    for line in out.split('\n'):
+        line = line.strip()
+        if not line.startswith("Row:"):
+            continue
+        _, _, rest = line.partition(' ')
+        _, _, rest = rest.partition(' ')
+        parts = re.split(r',\s*(?=\w+=)', rest)
+        m = {}
+        for p in parts:
+            if '=' in p:
+                k, _, v = p.partition('=')
+                m[k.strip()] = v.strip()
+        if m.get('type') == '1' and int(m.get('_id', 0)) > last_id:
+            msgs.append(m)
+    msgs.sort(key=lambda x: int(x.get('_id', 0)))
+    return msgs
+
+
+def get_max_sms_id() -> int:
+    rc, out = adb("shell", "content", "query", "--uri", "content://sms", timeout=10)
+    if rc != 0:
+        return 0
+    max_id = 0
+    for line in out.split('\n'):
+        if not line.strip().startswith("Row:"):
+            continue
+        m = re.search(r'\b_id=(\d+)', line)
+        if m:
+            max_id = max(max_id, int(m.group(1)))
+    return max_id
+
+
+def poll_adb_sms() -> None:
+    """Poll content://sms via ADB for new inbound SMS (fallback for non-Apple senders)."""
+    log.info("Starting ADB SMS poller...")
+    last_id = get_max_sms_id()
+    log.info(f"✅ ADB poll: watermark id={last_id}")
 
     while True:
-        time.sleep(POLL_SEC)
+        time.sleep(POLL_INTERVAL)
         try:
-            # Get recent messages
-            resp = httpx.get(
-                f"{GATEWAY_URL}/api/v1/messages",
-                auth=(GATEWAY_USER, GATEWAY_PASS),
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                log.debug(f"Gateway poll: HTTP {resp.status_code}")
-                continue
+            new_msgs = get_sms_since(last_id)
+            for m in new_msgs:
+                mid    = int(m.get('_id', 0))
+                sender = m.get('address', '')
+                text   = m.get('body', '')
+                ts_ms  = int(m.get('date', 0))
+                ts     = datetime.fromtimestamp(ts_ms / 1000).strftime('%H:%M:%S')
 
-            messages = resp.json() if isinstance(resp.json(), list) else resp.json().get("results", [])
-            for msg in messages:
-                msg_id = msg.get("id") or msg.get("messageId")
-                sender = msg.get("phoneNumber") or msg.get("sender") or msg.get("from")
-                text   = msg.get("message") or msg.get("body") or ""
-                state  = msg.get("state", "")
+                last_id = max(last_id, mid)
 
-                if not msg_id or not text or not sender:
-                    continue
-                if state not in ("", "received", "pending"):
+                if not text:
                     continue
 
-                with _seen_lock:
-                    if msg_id in _seen_ids:
-                        continue
-                    _seen_ids.add(msg_id)
-
-                log.info(f"[SMS] {sender}: {text[:80]}")
-                reply = get_ai_reply(sender, text, "SMS")
-                log.info(f"[SMS] → {reply[:80]}")
-
-                # Send reply via gateway
-                send_resp = httpx.post(
-                    f"{GATEWAY_URL}/api/3rdparty/v1/message",
-                    auth=(GATEWAY_USER, GATEWAY_PASS),
-                    json={"message": reply, "phoneNumbers": [sender]},
-                    timeout=15,
-                )
-                if send_resp.status_code in (200, 201):
-                    log.info(f"[SMS] ✅ Reply sent to {sender}")
-                else:
-                    log.warning(f"[SMS] Send failed: HTTP {send_resp.status_code}")
+                log.info(f"📨 ADB [{ts}] SMS from {sender}: {text[:60]}")
+                reply = get_ai_reply(sender, text)
+                if not reply:
+                    log.warning("No AI reply")
+                    continue
+                log.info(f"  ↳ AI: {reply[:80]}")
+                send_sms_gateway(sender, reply)
 
         except Exception as e:
-            log.debug(f"Gateway poller error: {e}")
+            log.error(f"ADB poll error: {e}")
 
 
-# ── Main ────────────────────────────────────────────────────────────────────
+# ── Status ────────────────────────────────────────────────────────────────────
 
-def main():
-    log.info("🚀 Mac Bridge starting — phone is just a modem")
-    log.info(f"OpenClaw: {OPENCLAW_URL}")
-    log.info(f"SMS Gateway: {GATEWAY_URL}")
+def show_status() -> None:
+    import requests
+    print("\n=== Mac Bridge Status ===")
 
-    threads = [
-        threading.Thread(target=imsg_watcher, daemon=True, name="iMessage"),
-        threading.Thread(target=gateway_sms_poller, daemon=True, name="SMS-Gateway"),
-    ]
-    for t in threads:
-        t.start()
-        log.info(f"✅ Started {t.name} thread")
-
-    log.info("Bridge running. Ctrl+C to stop.")
+    # imsg
     try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        log.info("Shutting down.")
+        r = subprocess.run([IMSG_BIN, "chats", "--limit", "1", "--json"],
+                           capture_output=True, text=True, timeout=5)
+        print(f"  imsg CLI:      {'✅ OK' if r.returncode == 0 else '❌ FAIL'}")
+    except Exception as e:
+        print(f"  imsg CLI:      ❌ {e}")
+
+    # OpenClaw
+    try:
+        r = requests.get(f"{OPENCLAW_URL}/v1/models",
+                         headers={"Authorization": f"Bearer {OPENCLAW_TOKEN}"},
+                         timeout=3)
+        print(f"  OpenClaw:      {'✅ OK' if r.ok else '❌ ' + str(r.status_code)}")
+    except Exception as e:
+        print(f"  OpenClaw:      ❌ {e}")
+
+    # Gateway
+    try:
+        r = requests.get(f"http://{PHONE_IP}:{PHONE_PORT}/",
+                         auth=(SMS_USER, SMS_PASS), timeout=3)
+        data = r.json()
+        print(f"  SMS Gateway:   ✅ {data.get('name', 'ok')} ({data.get('model', '?')})")
+    except Exception as e:
+        print(f"  SMS Gateway:   ❌ {e}")
+
+    # ADB
+    rc, out = adb("shell", "echo ok", timeout=5)
+    print(f"  ADB:           {'✅ ' + ADB_SERIAL if rc == 0 else '❌ not connected'}")
+
+    print()
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Mac Phone Bridge")
+    parser.add_argument("--status", action="store_true", help="Show status and exit")
+    parser.add_argument("--test-imsg", metavar="NUMBER",
+                        help="Send test iMessage to NUMBER and exit")
+    args = parser.parse_args()
+
+    if args.status:
+        show_status()
+        return
+
+    if args.test_imsg:
+        ok = send_imessage(args.test_imsg, "Mac bridge test — AI assistant online.")
+        print("Sent ✅" if ok else "Failed ❌")
+        return
+
+    show_status()
+
+    print("╔══════════════════════════════════════════╗")
+    print("║      MAC PHONE BRIDGE LIVE               ║")
+    print("║                                          ║")
+    print("║  iMessage/SMS : imsg watch (all Apple)   ║")
+    print("║  Android SMS  : ADB poll every 3s        ║")
+    print("║  AI           : Claude via OpenClaw      ║")
+    print("║  Ctrl+C       : stop                     ║")
+    print("╚══════════════════════════════════════════╝")
+    print()
+
+    # Start imsg watcher in background thread
+    t_imsg = threading.Thread(target=watch_imessages, daemon=True)
+    t_imsg.start()
+
+    # ADB poll runs in main thread
+    poll_adb_sms()
 
 
 if __name__ == "__main__":

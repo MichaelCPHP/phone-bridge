@@ -1,71 +1,87 @@
 #!/usr/bin/env bash
-# Phone Bridge — single-command ADB SMS bridge
-set -e
+# Phone Bridge — unified Mac-side launcher
+# Phone = modem. Mac = everything.
+#
+# Starts mac_bridge.py which handles:
+#   - iMessage + SMS via imsg watch (Mac Messages.app)
+#   - Android SMS via ADB poll (fallback)
+#   - AI replies via OpenClaw (Claude)
+#
+# Usage: bash run.sh
+# Stop:  Ctrl+C
 
-ADB_SERIAL="192.168.1.40:5555"
-GATEWAY_URL="http://localhost:18789/v1/chat/completions"
-GATEWAY_TOKEN="dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91"
-POLL_SEC=3
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
-# ── Verify ADB ─────────────────────────────────────────────────────────────
-echo "🔌 Checking ADB connection..."
-if ! adb -s "$ADB_SERIAL" shell echo ok 2>/dev/null | grep -q ok; then
-  echo "❌ ADB not connected. Run: adb connect $ADB_SERIAL"
-  exit 1
+export ADB_SERIAL="${ADB_SERIAL:-ZY22K45948}"
+export PHONE_IP="${PHONE_IP:-192.168.1.40}"
+export PHONE_PORT="${PHONE_PORT:-8080}"
+export SMS_USER="${SMS_USER:-sms}"
+export SMS_PASS="${SMS_PASS:-smspass1}"
+export OPENCLAW_URL="${OPENCLAW_URL:-http://localhost:18789}"
+export OPENCLAW_TOKEN="${OPENCLAW_TOKEN:-dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91}"
+export AI_MODEL="${AI_MODEL:-anthropic/claude-haiku-4-5}"
+export IMSG_BIN="${IMSG_BIN:-/opt/homebrew/bin/imsg}"
+
+log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+log "=== Phone Bridge Starting ==="
+
+# 1. ADB check (USB preferred, WiFi fallback)
+log "Checking Android..."
+if ! adb -s "$ADB_SERIAL" shell echo ok >/dev/null 2>&1; then
+    ADB_SERIAL="192.168.1.40:5555"
+    adb connect "$ADB_SERIAL" >/dev/null 2>&1 || true
+    adb -s "$ADB_SERIAL" shell echo ok >/dev/null 2>&1 || { log "❌ ADB not connected"; exit 1; }
 fi
-echo "✅ ADB connected: $ADB_SERIAL"
+MODEL=$(adb -s "$ADB_SERIAL" shell getprop ro.product.model 2>/dev/null | tr -d '\r')
+log "✅ Android: $MODEL ($ADB_SERIAL)"
 
-# ── Verify OpenClaw gateway ─────────────────────────────────────────────────
-echo "🔌 Checking OpenClaw gateway..."
-HTTP=$(curl -s -o /dev/null -w "%{http_code}" "$GATEWAY_URL" 2>/dev/null || echo "000")
-if [[ "$HTTP" != "200" && "$HTTP" != "405" && "$HTTP" != "401" ]]; then
-  echo "❌ Gateway not reachable (HTTP $HTTP)"
-  exit 1
+# 2. Google Messages must stay as default (writes inbound to DB)
+DEFAULT=$(adb -s "$ADB_SERIAL" shell cmd role get-role-holders android.app.role.SMS 2>/dev/null | tr -d '\r')
+if [ "$DEFAULT" != "com.google.android.apps.messaging" ]; then
+    log "Restoring Google Messages as default SMS app..."
+    adb -s "$ADB_SERIAL" shell cmd role set-bypassing-role-qualification true 2>/dev/null || true
+    adb -s "$ADB_SERIAL" shell cmd role add-role-holder android.app.role.SMS \
+        com.google.android.apps.messaging 0 2>/dev/null || true
 fi
-echo "✅ OpenClaw gateway OK"
+log "✅ SMS app: $(adb -s "$ADB_SERIAL" shell cmd role get-role-holders android.app.role.SMS 2>/dev/null | tr -d '\r')"
 
-# ── Get last SMS id ─────────────────────────────────────────────────────────
-LAST_ID=$(adb -s "$ADB_SERIAL" shell "content query --uri content://sms --projection '_id' --sort 'date DESC'" 2>/dev/null | head -1 | grep -o '_id=[0-9]*' | cut -d= -f2)
-LAST_ID=${LAST_ID:-0}
-echo "📱 Starting poll (last SMS id: $LAST_ID)"
+# 3. Kill stale processes
+pkill -f mac_bridge.py     2>/dev/null || true
+pkill -f sms_adb_monitor.py 2>/dev/null || true
+pkill -f sms_gateway.py    2>/dev/null || true
+sleep 1
+
+# 4. Start unified bridge
+log "Starting unified Mac bridge..."
+nohup python3 src/mac_bridge.py > /tmp/pb-monitor.log 2>&1 &
+BRIDGE_PID=$!
+sleep 3
+kill -0 "$BRIDGE_PID" 2>/dev/null || { log "❌ Bridge failed — check /tmp/pb-monitor.log"; exit 1; }
+log "✅ Bridge running: pid=$BRIDGE_PID"
+
+echo ""
+echo "╔══════════════════════════════════════════╗"
+echo "║      PHONE BRIDGE LIVE                   ║"
+echo "║                                          ║"
+echo "║  Android : +1-702-946-9526               ║"
+echo "║  iMessage: via Mac Messages.app (imsg)   ║"
+echo "║  SMS     : via ADB poll (every 3s)       ║"
+echo "║  AI      : Claude Haiku (OpenClaw)       ║"
+echo "║                                          ║"
+echo "║  Text either number to test              ║"
+echo "║  Logs: tail -f /tmp/pb-monitor.log       ║"
+echo "║  Stop: Ctrl+C                            ║"
+echo "╚══════════════════════════════════════════╝"
 echo ""
 
-# ── Poll loop ───────────────────────────────────────────────────────────────
-while true; do
-  # Query for new inbound SMS
-  NEW=$(adb -s "$ADB_SERIAL" shell "content query --uri content://sms --projection '_id,address,body' --where '_id > $LAST_ID AND type=1' --sort 'date ASC'" 2>/dev/null)
+cleanup() {
+    log "Shutting down..."
+    kill "$BRIDGE_PID" 2>/dev/null || true
+    exit 0
+}
+trap cleanup INT TERM
 
-  if [[ -n "$NEW" && "$NEW" != "No result found." ]]; then
-    while IFS= read -r line; do
-      if [[ "$line" == Row:* ]]; then
-        ID=$(echo "$line" | grep -o '_id=[0-9]*' | cut -d= -f2)
-        FROM=$(echo "$line" | grep -o 'address=[^,]*' | cut -d= -f2)
-        BODY=$(echo "$line" | grep -o 'body=.*' | cut -d= -f2-)
-
-        echo "[$(date +%H:%M:%S)] 📨 SMS from $FROM: $BODY"
-
-        # Get AI reply
-        BODY_ESCAPED=$(echo "$BODY" | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().strip()))" 2>/dev/null || echo '"Hey"')
-        REPLY=$(curl -s "$GATEWAY_URL" \
-          -H "Authorization: Bearer $GATEWAY_TOKEN" \
-          -H "Content-Type: application/json" \
-          -d "{\"model\":\"openclaw:main\",\"messages\":[{\"role\":\"system\",\"content\":\"You are Jarvis, a helpful AI. Reply via SMS. Be concise, max 160 chars.\"},{\"role\":\"user\",\"content\":$BODY_ESCAPED}],\"max_tokens\":100}" \
-          2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['choices'][0]['message']['content'].strip())" 2>/dev/null)
-
-        REPLY=${REPLY:-"Got your message! How can I help?"}
-        echo "[$(date +%H:%M:%S)] 🤖 Reply: $REPLY"
-
-        # Send reply via ADB
-        REPLY_SAFE=$(echo "$REPLY" | tr -d "'" | head -c 160)
-        adb -s "$ADB_SERIAL" shell "am start -a android.intent.action.SENDTO -d 'smsto:$FROM' --es 'sms_body' '$REPLY_SAFE'" 2>/dev/null
-        sleep 2
-        adb -s "$ADB_SERIAL" shell "input tap 985 2419" 2>/dev/null
-        echo "[$(date +%H:%M:%S)] ✅ Reply sent to $FROM"
-
-        LAST_ID=$ID
-      fi
-    done <<< "$NEW"
-  fi
-
-  sleep "$POLL_SEC"
-done
+tail -f /tmp/pb-monitor.log
