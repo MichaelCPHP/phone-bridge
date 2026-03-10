@@ -1,93 +1,108 @@
 # Phone Bridge — Architecture Decision Record
 
-## Decision: Option A (Hosted APIs) for MVP
-
 **Date:** 2026-03-09  
-**Decision authority:** Jarvis (delegated by Michael)
+**Decision authority:** Jarvis (acting orchestrator)  
+**Status:** APPROVED — moving to implementation
 
 ---
 
-## Problem
-Build an AI phone bridge on an Android device that can:
-- Make/receive real phone calls with AI voice
-- Send/receive SMS
-- Respond in near-real-time (<2s round-trip)
+## Decision Summary
 
-## Why VoiceBox Was Rejected
-- CPU-only PyTorch (Mac Mini)
-- Benchmark: 104,294ms for a single TTS phrase → completely unusable for real-time
-- Model instability (auto-switching 0.6B ↔ 1.7B during test)
+VoiceBox (CPU-only Qwen3-TTS) is **disqualified** for real-time calls.  
+Benchmark: 104s to generate "Hello." on CPU — unusable for live conversation.
+
+**Chosen stack: Hosted APIs for MVP (Option A)**
 
 ---
 
 ## Architecture
 
 ```
-[Android Phone]
-    ↕ (SIP via Linphone + Asterisk)         ← voice calls
-    ↕ (android-sms-gateway REST API)         ← SMS
+Android Phone
+    │
+    ├── SMS: android-sms-gateway app
+    │       ↕ HTTP REST (send) / Webhook (receive)
+    │
+    └── Calls: Linphone SIP client
+            ↕ SIP/RTP
+            Asterisk SIP server (Docker, Mac)
+                │
+                ├── Inbound audio stream
+                │       ↓
+                │   Deepgram Nova-2 (WebSocket streaming STT)
+                │       ↓ transcript
+                │   Claude Haiku (AI response, <300ms)
+                │       ↓ response text
+                │   ElevenLabs Streaming TTS (<400ms first chunk)
+                │       ↓ audio
+                └── Back to caller via SIP/RTP
 
-[Mac Bridge Server — Node.js]
-    ↓ inbound audio stream
-    
-[Deepgram Nova-2 API]          ← STT, streaming, ~300-500ms
-    ↓ transcript text
-    
-[Claude Haiku API]             ← AI response, ~500ms
-    ↓ response text
-    
-[ElevenLabs / OpenAI TTS API]  ← TTS, ~200-400ms
-    ↓ audio stream
-    
-[Back to Android via SIP/Linphone]
+Mac Server (Node.js bridge)
+    ├── /webhook/sms — receives incoming SMS from android-sms-gateway
+    ├── /send/sms    — sends SMS via android-sms-gateway REST API
+    ├── /call/outbound — triggers outbound call via Asterisk
+    └── /call/inbound  — handles inbound call AI pipeline
 ```
 
-### Estimated Round-Trip
-| Step | Latency |
-|------|---------|
-| STT (Deepgram streaming) | 300–500ms |
-| AI (Claude Haiku) | 300–600ms |
-| TTS (ElevenLabs/OpenAI) | 200–400ms |
-| **Total** | **~800ms–1.5s** ✅ |
+---
+
+## Component Decisions
+
+### Android Bridge
+- **SMS:** [android-sms-gateway](https://github.com/capcom6/android-sms-gateway) — lightweight app, REST API + webhooks
+- **Calls:** Linphone SIP client on Android + local Asterisk (Docker) on Mac
+- **Why not ADB:** Requires USB connection or ADB over WiFi (unreliable)
+- **Why not Termux:** More setup complexity, no advantage for this stack
+
+### STT
+- **Deepgram Nova-2** — streaming WebSocket, ~300-500ms, phone-quality audio model
+- ~~VoiceBox /transcribe~~ — disqualified (CPU too slow)
+
+### TTS
+- **ElevenLabs Streaming TTS** — <400ms first chunk, natural voice
+- Fallback: OpenAI TTS API
+- ~~VoiceBox /generate~~ — disqualified (104s on CPU)
+
+### AI
+- **Claude Haiku** (claude-haiku-4) — fastest Claude model, ~200-300ms
+- System prompt: Jarvis persona — professional, concise, helpful
+
+### Server
+- **Node.js** — async I/O, good WebSocket/stream support
+- Runs on Mac, bridges all components
 
 ---
 
-## Components
+## Latency Budget (Target: <2s total)
 
-### Phase 1 — SMS (implement first, faster)
-- **android-sms-gateway**: Docker + APK on Android
-- REST API for send/receive SMS
-- Mac bridge subscribes to webhook for inbound SMS
-- AI processes and auto-replies
-
-### Phase 2 — Voice Calls
-- **Asterisk** on Mac as SIP server
-- **Linphone** on Android as SIP client
-- Inbound call → Asterisk → Mac bridge → Deepgram STT → Claude → ElevenLabs TTS → Asterisk → Linphone
-
-### Android Requirements
-- Android 8+ (for android-sms-gateway compatibility)
-- USB or WiFi connection to Mac
-- Linphone app (free, SIP client)
-- android-sms-gateway APK
+| Component | Target |
+|-----------|--------|
+| STT (Deepgram) | 300-500ms |
+| AI (Claude Haiku) | 200-300ms |
+| TTS first chunk (ElevenLabs) | 300-400ms |
+| Network/routing overhead | 100-200ms |
+| **Total** | **900ms–1.4s** ✅ |
 
 ---
 
-## API Keys Needed
-- [ ] Deepgram API key (STT)
-- [ ] ElevenLabs API key (TTS) — OR OpenAI TTS (already have key?)
-- [ ] Twilio or VoIP.ms account for SIP DID (real phone number) — optional for WiFi-only
+## Issues / Task Assignments
+
+| # | Title | Assignee |
+|---|-------|----------|
+| #8 | SMS Gateway integration | @friday |
+| #9 | SIP call routing (Linphone + Asterisk) | @friday |
+| #10 | Deepgram STT pipeline | @friday |
+| #11 | ElevenLabs TTS pipeline | @friday |
+| #12 | Claude Haiku AI conversation layer | @friday |
+| #13 | E2E test suite | @friday |
 
 ---
 
-## Long-Term (Option C)
-- Keep VoiceBox for non-realtime: SMS readback, notifications, agent voice logging
-- Replace live call path with hosted APIs (this architecture)
+## VoiceBox — Future Use
 
----
+VoiceBox remains running and is suitable for:
+- Non-realtime voice generation (notifications, summaries)
+- SMS readback (read incoming SMS aloud)
+- Pre-generated audio responses
 
-## Implementation Order
-1. `[IMPL-SMS]` android-sms-gateway setup + Mac bridge API
-2. `[IMPL-VOICE]` Asterisk + Linphone SIP stack
-3. `[IMPL-AI]` Claude Haiku integration with Deepgram + ElevenLabs
-4. `[E2E]` Full call flow test: inbound call → AI response → caller hears reply
+Not suitable for: live call real-time conversation.
