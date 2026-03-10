@@ -28,12 +28,14 @@ PHONE_IP      = os.getenv("PHONE_IP",   "192.168.1.40")
 PHONE_PORT    = os.getenv("PHONE_PORT", "8080")
 SMS_USER      = os.getenv("SMS_USER",   "sms")
 SMS_PASS      = os.getenv("SMS_PASS",   "smspass1")
+ADB_SERIAL    = os.getenv("ADB_SERIAL", "ZY22K45948")   # USB serial, avoids multi-device ambiguity
 
 
 # ── ADB ───────────────────────────────────────────────────────────────────────
 
 def adb(*args, timeout: int = 15) -> tuple[int, str]:
-    r = subprocess.run(["adb"] + list(args), capture_output=True, text=True, timeout=timeout)
+    cmd = ["adb", "-s", ADB_SERIAL] + list(args)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     return r.returncode, (r.stdout + r.stderr).strip()
 
 
