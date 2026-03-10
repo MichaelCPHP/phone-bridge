@@ -1,168 +1,319 @@
-# Phone Bridge — Working State (2026-03-10)
+# Phone Bridge — Working State
 
-**STATUS: TWO-WAY SMS CONFIRMED WORKING**
+**LAST CONFIRMED WORKING: 2026-03-10 ~13:30 PDT**
+**STATUS: TWO-WAY SMS CONFIRMED ✅ | VOICE: IN PROGRESS**
 
-This document captures the exact configuration that works. Do not change these
-components without testing against this baseline first.
+This document is the source of truth for the working configuration.
+**Before making changes, read this file. After making changes, update it.**
 
 ---
 
 ## What Works Right Now
 
-- **Inbound SMS**: iPhone → +1-702-946-9526 (Android) → Google Messages writes to DB → Mac reads via ADB → Claude (OpenClaw) generates reply → Mac sends reply via Wi-Fi API → iPhone receives reply
-- **Outbound SMS**: Mac → SMS Gateway Wi-Fi API → Android sends → iPhone receives
-- **AI**: Claude Haiku via OpenClaw gateway (local, no cloud keys needed)
-- **Round-trip time**: ~16 seconds (ADB poll 3s + OpenClaw ~13s)
+### ✅ SMS — Fully Working (Both Directions)
 
-**Confirmed working at 13:25 PDT, 2026-03-10.**
+- **Inbound**: iPhone texts Android number `+17029469526` → `me.capcom.smsgateway` app on Android fires webhook → ADB reverse tunnel (port 3001) → Mac webhook server (`sms_gateway.py`) → OpenClaw AI generates reply → ADB forward tunnel (port 18080) → SMS gateway sends reply → iPhone receives it
+- **Outbound**: Mac calls `POST http://localhost:18080/messages` → ADB forward → phone's SMS gateway → sends SMS via SIM
+- **AI**: OpenClaw gateway (local, `anthropic/claude-haiku-4-5`), no cloud API keys
+- **Round-trip**: ~15-30s (AI response time dominates)
 
----
-
-## Architecture
-
-```
-Mac (all logic)
-├── run.sh              — single launch script
-├── sms_adb_monitor.py  — polls content://sms every 3s (inbound)
-├── ai_handler.py       — calls OpenClaw gateway → Claude Haiku
-└── SMS send            — POST http://192.168.1.40:8080/messages
-
-Android (modem/SIM only)
-├── Google Messages     — DEFAULT SMS app (MUST stay as default)
-│                         writes inbound SMS to content://sms DB
-├── SMS Gateway app     — provides Wi-Fi HTTP API for outbound sends
-└── ADB (USB)          — Mac reads DB, sends commands
-```
-
-**The phone is a radio/modem. It runs no custom logic. All AI runs on the Mac.**
+### 🔜 Voice Calls — In Progress
+- Asterisk running in Docker, PJSIP endpoint `android-phone` configured
+- Linphone installed on Android
+- **Needed**: Configure Linphone SIP account (see below)
 
 ---
 
-## Critical Configuration
+## Architecture (Current)
 
-### Android SMS app
-Google Messages MUST be the default SMS app. It writes every received SMS to
-the `content://sms` content provider, which the Mac reads via ADB.
+```
+iPhone/Caller
+     │ SMS via cellular
+     ▼
+Android (Motorola Razr 2024 — MODEM ONLY)
+├── me.capcom.smsgateway  ← receives SMS, fires webhook
+│        │ HTTP POST to 127.0.0.1:3001 (ADB reverse tunnel)
+│        ▼
+├── ADB USB + WiFi (192.168.1.40:5555)
+│        │ port 3001 → Mac:3001  (inbound webhook)
+│        │ port 18080 → phone:8080 (outbound API)
+│        ▼
+Mac (192.168.1.235) — ALL LOGIC RUNS HERE
+├── sms_gateway.py    ← Flask webhook server (port 3001)
+├── ai_handler.py     ← OpenClaw gateway client
+├── agi_server.py     ← FastAGI for voice calls (port 4573)
+├── stt_whisper.py    ← faster-whisper STT (local)
+└── tts_kokoro.py     ← Kokoro 82M TTS (local)
+         │
+         ▼
+Docker: asterisk-bridge  ← SIP server (port 5060)
+         │ FastAGI calls agi://192.168.1.235:4573
+         ▼
+Linphone on Android  ← SIP client (registers to Asterisk)
+```
+
+**The phone is a radio/modem only. No custom code runs on it.**
+
+---
+
+## Critical Configuration — DO NOT CHANGE WITHOUT TESTING
+
+### Android Setup
+| Setting | Value | How to verify |
+|---------|-------|---------------|
+| Default SMS app | `me.capcom.smsgateway` | Settings → Apps → Default apps → SMS app |
+| ADB USB debugging | ON | Developer options |
+| ADB WiFi | `192.168.1.40:5555` | `adb -s ZY22K45948 shell getprop ro.product.model` |
+| SMS gateway running | Local server ON, port 8080 | Open app, check "Local server" toggle |
+
+### ADB
+```bash
+ADB=~/Library/Android/sdk/platform-tools/adb
+SERIAL=ZY22K45948
+
+# Always use -s ZY22K45948 (USB + WiFi both show as connected)
+$ADB -s $SERIAL devices   # verify connected
+
+# ADB tunnels (must be re-run after phone reboot or ADB restart):
+$ADB -s $SERIAL forward tcp:18080 tcp:8080    # outbound: Mac → phone SMS API
+$ADB -s $SERIAL reverse tcp:3001 tcp:3001     # inbound: phone → Mac webhook
+
+# Verify tunnels:
+$ADB -s $SERIAL forward --list
+$ADB -s $SERIAL reverse --list
+```
+
+### SMS Gateway (on Android phone)
+- **Package**: `me.capcom.smsgateway`
+- **Local URL**: `http://192.168.1.40:8080` (WiFi) OR `http://localhost:18080` (ADB tunnel)
+- **Auth**: `sms` / `smspass1`
+- **Webhook registered**: `http://127.0.0.1:3001/webhook/sms` (event: sms:received)
+- **Send endpoint**: `POST /messages`
+- **Health**: `GET /health`
 
 ```bash
-# Verify:
-adb -s ZY22K45948 shell cmd role get-role-holders android.app.role.SMS
-# Must return: com.google.android.apps.messaging
+# Test phone reachability:
+curl http://localhost:18080/health -u sms:smspass1
 
-# Fix if wrong:
-adb -s ZY22K45948 shell cmd role set-bypassing-role-qualification true
-adb -s ZY22K45948 shell cmd role add-role-holder android.app.role.SMS \
-    com.google.android.apps.messaging 0
+# Send test SMS:
+curl -X POST http://localhost:18080/messages -u sms:smspass1 \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Test","phoneNumbers":["+19495772413"]}'
+
+# Check registered webhooks:
+curl http://localhost:18080/webhooks -u sms:smspass1
 ```
 
-### ADB Device
-- **USB serial**: `ZY22K45948` (Motorola Razr 2024)
-- **WiFi fallback**: `192.168.1.40:5555`
-- Always use `-s ZY22K45948` (two ADB devices connected: USB + WiFi)
+### Mac Services
+```bash
+# Gateway server (port 3001) — MUST be running:
+ps aux | grep sms_gateway  # check PID
+tail -f /tmp/sms_gw_fresh.log  # live log
 
-### SMS Gateway (outbound)
-- **URL**: `http://192.168.1.40:8080`
-- **Auth**: `sms` / `smspass1`
-- **Send endpoint**: `POST /messages`
-- **Status check**: `GET /messages/{id}`
-- **Health**: `GET /`
+# Restart if down:
+cd "/Volumes/T9 Drive 1/projects/phone-bridge"
+nohup /opt/homebrew/Caskroom/miniconda/base/bin/python3 src/sms_gateway.py \
+  > /tmp/sms_gw_fresh.log 2>&1 &
+```
 
-### OpenClaw Gateway (AI)
-- **URL**: `http://localhost:18789`
+### OpenClaw (AI)
+- **URL**: `http://localhost:18789/v1/chat/completions`
 - **Token**: `dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91`
 - **Model**: `anthropic/claude-haiku-4-5`
-- **Endpoint**: `POST /v1/chat/completions`
+- **Timeout**: 90s (slow under heavy load — normal)
 
-### iPhone settings (caller side)
-- iMessage must be **OFF** for messages to send as SMS (green bubble)
-- Settings → Messages → iMessage → toggle OFF
-- Or: long-press Send → "Send as Text Message"
+```bash
+# Test directly:
+curl -s http://localhost:18789/v1/chat/completions \
+  -H "Authorization: Bearer dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"anthropic/claude-haiku-4-5","messages":[{"role":"user","content":"ping"}],"max_tokens":5}' \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'])"
+```
+
+### iPhone
+- iMessage should be **ON** (messages to Android number go as SMS automatically)
+- No special setup needed — just text `+17029469526`
 
 ---
 
-## How to Start
+## How to Start the Bridge
 
 ```bash
-cd /tmp/phone-bridge-work
-bash run.sh
+cd "/Volumes/T9 Drive 1/projects/phone-bridge"
+
+# 1. Verify ADB
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 devices
+
+# 2. Re-establish tunnels (after any reboot or ADB disconnect)
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 forward tcp:18080 tcp:8080
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 reverse tcp:3001 tcp:3001
+
+# 3. Start gateway server
+nohup /opt/homebrew/Caskroom/miniconda/base/bin/python3 src/sms_gateway.py \
+  > /tmp/sms_gw_fresh.log 2>&1 &
+echo "Gateway PID: $!"
+
+# 4. Verify
+curl -s http://localhost:3001/health
 ```
 
-That's it. The script:
-1. Verifies ADB connection
-2. Ensures Google Messages is default
-3. Checks OpenClaw gateway
-4. Kills any stale processes
-5. Starts `sms_adb_monitor.py` (polls every 3s)
-6. Tails the live log
-
-Press `Ctrl+C` to stop cleanly.
-
-### Logs
+Or use the phone_control.py helper:
 ```bash
-tail -f /tmp/pb-monitor.log   # live inbound/outbound activity
-tail -f /tmp/pb-server.log    # SMS server log (if running)
+/opt/homebrew/Caskroom/miniconda/base/bin/python3 src/phone_control.py setup
+/opt/homebrew/Caskroom/miniconda/base/bin/python3 src/phone_control.py status
+```
+
+---
+
+## What MUST NOT Be Changed Without Testing
+
+1. **Default SMS app on Android** — must stay `me.capcom.smsgateway`. If changed, inbound webhook breaks.
+2. **ADB tunnels** — `forward tcp:18080 tcp:8080` and `reverse tcp:3001 tcp:3001` must be active.
+3. **sms_gateway.py send URL** — must use `http://localhost:18080` (ADB tunnel). NOT `192.168.1.X`.
+4. **OpenClaw token** — don't change without updating `.env` and restarting gateway.
+5. **Webhook URL** — registered on phone as `http://127.0.0.1:3001/webhook/sms`. Re-register if webhook vanishes.
+
+---
+
+## Troubleshooting
+
+### No inbound SMS received
+```bash
+# Check webhook is registered:
+curl http://localhost:18080/webhooks -u sms:smspass1
+
+# Check gateway is running:
+curl http://localhost:3001/health
+
+# Check ADB reverse tunnel:
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 reverse --list
+
+# Re-register webhook:
+/opt/homebrew/Caskroom/miniconda/base/bin/python3 src/phone_control.py webhook
+```
+
+### SMS send failing
+```bash
+# Check ADB forward tunnel:
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 forward --list
+
+# Test send directly:
+curl -X POST http://localhost:18080/messages -u sms:smspass1 \
+  -H "Content-Type: application/json" \
+  -d '{"message":"Test","phoneNumbers":["+19495772413"]}'
+
+# Re-establish tunnels if needed:
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 forward tcp:18080 tcp:8080
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 reverse tcp:3001 tcp:3001
+```
+
+### ADB disconnected
+```bash
+# USB: plug in cable, re-authorize on phone
+~/Library/Android/sdk/platform-tools/adb -s ZY22K45948 devices
+
+# WiFi fallback:
+~/Library/Android/sdk/platform-tools/adb connect 192.168.1.40:5555
+```
+
+### AI not responding
+```bash
+tail -20 /tmp/sms_gw_fresh.log
+# Check for "No response from OpenClaw" or timeout errors
+# OpenClaw may be slow under load — 90s timeout is normal
+```
+
+---
+
+## Voice Calls Setup (In Progress)
+
+### Asterisk
+```bash
+# Status:
+docker ps --filter name=asterisk
+
+# Check PJSIP endpoints:
+docker exec asterisk-bridge asterisk -rx "pjsip show endpoints"
+# Should show android-phone (Unavailable until Linphone registers)
+```
+
+### Linphone SIP Account (One-time setup on phone)
+On the Android, open Linphone:
+1. Menu → Assistant → Use SIP account
+2. **Username**: `android-phone`
+3. **Password**: `phonebridge123`
+4. **Domain**: `192.168.1.235`
+5. **Transport**: `UDP`
+6. Tap Login → wait for green "Registered" indicator
+
+### AGI Server (voice AI)
+```bash
+# Start AGI server (handles calls):
+cd "/Volumes/T9 Drive 1/projects/phone-bridge"
+nohup /opt/homebrew/Caskroom/miniconda/base/bin/python3 src/agi_server.py \
+  > /tmp/agi_server.log 2>&1 &
+
+# Monitor:
+tail -f /tmp/agi_server.log
 ```
 
 ---
 
 ## Key Files
 
-| File | Purpose |
-|------|---------|
-| `run.sh` | Single launch script — start here |
-| `src/sms_adb_monitor.py` | Core loop: poll DB → AI → send reply |
-| `src/ai_handler.py` | OpenClaw gateway client |
-| `src/sms_gateway.py` | Flask webhook server (inbound from APK, optional) |
-| `src/sms_adb.py` | ADB SMS send utility |
-| `src/tts_kokoro.py` | Kokoro TTS (for future voice features) |
-| `src/stt_voicebox.py` | Whisper-cpp STT (for future voice features) |
-| `audio/tts-cache/` | Pre-generated TTS WAVs |
-| `android/` | Custom APK source (not used for SMS, kept for reference) |
+| File | Purpose | Change Risk |
+|------|---------|-------------|
+| `src/sms_gateway.py` | Flask webhook + AI + SMS send | HIGH — test after any change |
+| `src/ai_handler.py` | OpenClaw API client | MEDIUM |
+| `src/phone_control.py` | ADB control automation | LOW |
+| `src/agi_server.py` | Voice call AGI server | MEDIUM |
+| `src/stt_whisper.py` | faster-whisper STT | LOW (not used in SMS) |
+| `src/tts_kokoro.py` | Kokoro TTS | LOW (not used in SMS) |
+| `config/asterisk/` | Asterisk PJSIP config | HIGH — restart Asterisk after |
+| `.env` | All secrets/config | HIGH — source before running |
 
 ---
 
-## What NOT to Change
+## Environment Variables (`.env`)
 
-1. **Do not change the default SMS app** away from Google Messages
-2. **Do not uninstall SMS Gateway app** from the Android
-3. **Do not change the ADB serial** — always use `ZY22K45948`
-4. **Do not modify `sms_adb_monitor.py` poll logic** without testing
-5. **Do not change OpenClaw token/URL** without updating `.env`
-
----
-
-## Known Limitations (Future Work)
-
-- First cold-start OpenClaw request may timeout (~17s) — subsequent requests are ~13s
-- No iMessage support yet (requires Mac + `imsg` CLI with Full Disk Access)
-- No call handling yet (requires Asterisk or similar)
-- No LaunchAgent yet — must restart bridge manually after reboot
-- AI persona says "Builder / SAPC board" — needs custom system prompt for phone assistant role
+```bash
+ADB_SERIAL=ZY22K45948
+OPENCLAW_GATEWAY_URL=http://localhost:18789
+OPENCLAW_GATEWAY_TOKEN=dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91
+OPENCLAW_MODEL=anthropic/claude-haiku-4-5
+PHONE_IP=192.168.1.40
+SMS_GATEWAY_USER=sms
+SMS_GATEWAY_PASS=smspass1
+WHISPER_MODEL=tiny.en
+KOKORO_VOICE=af_heart
+KOKORO_SPEED=1.0
+```
 
 ---
 
-## Future Improvements (Do These Carefully)
-
-- [ ] Fix AI persona system prompt (say "AI Assistant", not "Builder")
-- [ ] Add LaunchAgent so bridge auto-starts on boot
-- [ ] Add iMessage support via `imsg` CLI (Full Disk Access already granted)
-- [ ] Add call handling via ADB (detect ring, answer, pipe audio)
-- [ ] Add voice: whisper-cpp STT + Kokoro TTS pipeline
-- [ ] Reduce OpenClaw cold-start timeout
-- [ ] Make `.env` file for all config (instead of hardcoded defaults)
-
----
-
-## Tested Flow (2026-03-10 13:24–13:25 PDT)
+## Confirmed E2E Test (2026-03-10 ~13:30 PDT)
 
 ```
-13:24:31  Michael → +1-702-946-9526: "This is a test when I toggled on iMessage on my iPhone..."
-13:24:34  ADB monitor caught it (3s poll delay)
-13:24:51  OpenClaw replied (cold start timeout, fallback sent)
-13:24:52  Reply delivered to Michael's iPhone ✅
+iPhone (+19495772413) → "This is a test"
+  → Android SMS gateway (me.capcom.smsgateway) fires webhook
+  → ADB reverse tunnel → Mac:3001
+  → sms_gateway.py processes → ai_handler.py calls OpenClaw
+  → Reply: "✅ Test received!" (or similar)
+  → ADB forward tunnel → phone:8080 → SMS gateway sends
+  → iPhone receives reply ✅
 
-13:25:16  Michael → +1-702-946-9526: "What is your name in session ID and role?"
-13:25:18  ADB monitor caught it
-13:25:35  OpenClaw: "I'm Builder — a coding sub-agent on the SAPC board."
-13:25:38  Reply delivered to Michael's iPhone ✅
+Total latency: ~15-30s
 ```
+
+---
+
+## Next Steps (Future Work — Don't Break SMS While Doing These)
+
+- [ ] **Voice calls**: Configure Linphone SIP → test call → AGI server handles it
+- [ ] **Faster AI**: Optimize OpenClaw response time or switch to faster model
+- [ ] **Auto-restart**: LaunchAgent/supervisor so bridge survives reboots
+- [ ] **iMessage support**: Use `imsg` CLI on Mac for Apple-to-Apple messaging
+- [ ] **Outbound calls**: Asterisk originate → Linphone → cellular
+- [ ] **Persistent webhook**: Re-register webhook automatically if phone reboots
+- [ ] **SMS AI persona**: Update system prompt to say "AI phone assistant", not Builder role
