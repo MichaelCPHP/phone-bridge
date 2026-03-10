@@ -30,6 +30,7 @@ ADB_PATHS = [
     "adb",
 ]
 ADB = next((p for p in ADB_PATHS if Path(p).exists() or p == "adb"), "adb")
+ADB_SERIAL = os.getenv("ADB_SERIAL", "")  # e.g. ZY22K45948 or 192.168.1.40:5555
 
 POLL_SECS     = float(os.getenv("POLL_INTERVAL_SECS", "3"))
 SMS_DB        = "/data/data/com.android.providers.telephony/databases/mmssms.db"
@@ -38,7 +39,10 @@ LAST_ID_FILE  = Path("/tmp/sms_adb_last_id.txt")
 
 def adb(*args, timeout=10) -> tuple[int, str]:
     """Run an adb command. Returns (returncode, stdout)."""
-    cmd = [ADB] + list(args)
+    cmd = [ADB]
+    if ADB_SERIAL:
+        cmd += ["-s", ADB_SERIAL]
+    cmd += list(args)
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return r.returncode, (r.stdout + r.stderr).strip()
@@ -135,9 +139,13 @@ def get_sms_from_notifications() -> list[dict]:
     """
     Read incoming SMS from Android notification dump.
     Works even when Google Messages doesn't write to content://sms.
-    Returns list of {notif_id, address, body} dicts.
+
+    Google Messages groups all messages from a contact under one notification ID,
+    so we dedup by content hash (address + body), not notif_id.
+
+    Returns list of {msg_key, address, body} dicts.
     """
-    import re as _re
+    import re as _re, hashlib as _hash
     code, content = adb("shell", "dumpsys", "notification", "--noredact", timeout=15)
     if code != 0:
         return []
@@ -150,11 +158,7 @@ def get_sms_from_notifications() -> list[dict]:
         if "android.messages" not in block:
             continue
 
-        # Get notification ID for dedup
-        key_m = _re.search(r'incoming_message:(\d+)', block)
-        notif_id = int(key_m.group(1)) if key_m else -1
-
-        # Extract sender + text from Bundle entries
+        # Extract ALL message entries from the Bundle (Google groups them)
         msg_blocks = _re.findall(
             r'sender=([^,\n]+).*?text=([^\n,}]+)',
             block, _re.DOTALL
@@ -162,30 +166,36 @@ def get_sms_from_notifications() -> list[dict]:
         for sender, text in msg_blocks:
             sender = sender.strip()
             text = text.strip()
-            if sender and text:
-                results.append({
-                    "notif_id": notif_id,
-                    "address": _re.sub(r'[\s\(\)\-]', '', sender),
-                    "body": text,
-                })
+            # Skip spam/non-person senders
+            if not sender or not text:
+                continue
+            # Normalize address
+            address = _re.sub(r'[\s\(\)\-]', '', sender)
+            # Content-based dedup key (hash of address + body)
+            msg_key = _hash.md5(f"{address}|{text}".encode()).hexdigest()
+            results.append({
+                "msg_key": msg_key,
+                "address": address,
+                "body": text,
+            })
     return results
 
 
-_seen_notif_ids: set = set()
-SEEN_IDS_FILE = Path("/tmp/sms_seen_notif_ids.txt")
+_seen_msg_keys: set = set()
+SEEN_IDS_FILE = Path("/tmp/sms_seen_msg_keys.txt")
 
 
 def load_seen_ids():
-    global _seen_notif_ids
+    global _seen_msg_keys
     try:
-        _seen_notif_ids = set(int(x) for x in SEEN_IDS_FILE.read_text().split() if x.strip())
+        _seen_msg_keys = set(SEEN_IDS_FILE.read_text().split())
     except Exception:
-        _seen_notif_ids = set()
+        _seen_msg_keys = set()
 
 
-def save_seen_id(notif_id: int):
-    _seen_notif_ids.add(notif_id)
-    SEEN_IDS_FILE.write_text("\n".join(str(i) for i in _seen_notif_ids))
+def save_seen_id(msg_key: str):
+    _seen_msg_keys.add(msg_key)
+    SEEN_IDS_FILE.write_text("\n".join(_seen_msg_keys))
 
 
 def dismiss_notification(notif_id: int):
@@ -285,19 +295,25 @@ def poll_loop():
                 continue
 
             # Primary: notification-based (works with Google Messages 12+)
+            # Dedup by content hash so grouped notifications work correctly
             notif_msgs = get_sms_from_notifications()
             for msg in notif_msgs:
-                nid = msg.get("notif_id", -1)
-                if nid in _seen_notif_ids:
+                key = msg.get("msg_key", "")
+                if key in _seen_msg_keys:
                     continue
-                log.info(f"📩 [notif] SMS from {msg['address']}: {msg['body']!r}")
+                # Skip known spam patterns
+                addr = msg.get("address", "")
+                if addr.isdigit() and len(addr) <= 6:
+                    save_seen_id(key)  # mark spam as seen, don't reply
+                    continue
+                log.info(f"📩 [notif] SMS from {addr}: {msg['body']!r}")
                 try:
-                    reply = handle_sms(msg["address"], msg["body"])
+                    reply = handle_sms(addr, msg["body"])
                     log.info(f"🤖 Replying: {reply!r}")
-                    send_sms(msg["address"], reply)
+                    send_sms(addr, reply)
                 except Exception as e:
                     log.error(f"AI/send error: {e}")
-                save_seen_id(nid)
+                save_seen_id(key)
 
             # Fallback: content provider (works on older Android / non-Google Messages)
             new_msgs = get_new_incoming_sms(last_id)
