@@ -45,7 +45,7 @@ def respond(user_message: str, context: str = "sms", history: list | None = None
     """
     client = get_client()
     
-    messages = history or []
+    messages = list(history or [])  # copy — do not mutate caller's list
     messages.append({"role": "user", "content": user_message})
     
     system = SYSTEM_PROMPT
