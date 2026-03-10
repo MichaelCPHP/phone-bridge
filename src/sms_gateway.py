@@ -33,7 +33,7 @@ app = Flask(__name__)
 def send_sms(phone_number: str, message: str) -> dict:
     """Send an SMS via android-sms-gateway."""
     resp = requests.post(
-        f"{BASE_URL}/api/3rdparty/v1/message",
+        f"{BASE_URL}/messages",
         auth=AUTH,
         json={"message": message, "phoneNumbers": [phone_number]},
         timeout=10
@@ -87,7 +87,7 @@ def handle_inbound_sms(phone_number: str, message: str) -> str | None:
 @app.route("/health", methods=["GET"])
 def health():
     try:
-        resp = requests.get(f"{BASE_URL}/api/3rdparty/v1/health", auth=AUTH, timeout=5)
+        resp = requests.get(f"{BASE_URL}/health", auth=AUTH, timeout=5)
         phone_ok = resp.status_code == 200
     except Exception:
         phone_ok = False
