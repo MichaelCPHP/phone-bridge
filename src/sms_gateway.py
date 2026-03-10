@@ -68,34 +68,25 @@ def is_duplicate(sender: str, body: str) -> bool:
 
 
 def get_ai_reply(sender: str, text: str) -> str | None:
-    """Get plain-text AI reply via OpenClaw. Returns None on failure."""
+    """Get reply from Jarvis agent via openclaw agent CLI (targets Jarvis directly)."""
+    import subprocess as sp
+    prompt = f"SMS from {sender}: {text}\nReply in 1-2 plain sentences, max 160 chars. No markdown."
     try:
-        resp = requests.post(
-            f"{OPENCLAW_URL}/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENCLAW_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": AI_MODEL,
-                "max_tokens": 120,
-                "messages": [
-                    {"role": "system", "content": (
-                        "You are a helpful AI phone assistant. "
-                        "Reply in plain text only, 1-2 sentences max, under 160 characters. "
-                        "No markdown, no bullet points, no preamble."
-                    )},
-                    {"role": "user", "content": text},
-                ],
-            },
-            timeout=30,
+        env = {**__import__('os').environ,
+               "PATH": "/Users/michaeltgcm/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
+        result = sp.run(
+            ["openclaw", "agent", "--agent", "jarvis", "--message", prompt],
+            capture_output=True, text=True, timeout=60, env=env
         )
-        resp.raise_for_status()
-        reply = resp.json()["choices"][0]["message"]["content"].strip()
-        # Strip any markdown that snuck in
+        reply = result.stdout.strip()
+        if not reply:
+            log.warning(f"Empty reply from openclaw agent, stderr: {result.stderr[:100]}")
+            return None
+        # Strip markdown
         reply = re.sub(r'\*+', '', reply)
         reply = re.sub(r'#+\s*', '', reply)
         reply = reply[:REPLY_MAX_LEN]
+        log.info(f"Jarvis reply: {reply[:60]}")
         return reply
     except Exception as e:
         log.error(f"AI error: {e}")
