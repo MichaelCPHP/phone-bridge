@@ -1,5 +1,13 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — Fix MMS SENDTO shell quoting
+
+**Author:** Friday
+
+- send_mms_via_adb: pass am start as single shell string (fixes + and spaces in recipients/body)
+- Validated: EditText pre-filled correctly, Send MMS tap works, mms_id=219 sent to thread 48
+
+
 ## 2026-03-10 — MMS group reply via ADB UIAutomator
 
 **Author:** Friday

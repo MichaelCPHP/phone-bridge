@@ -370,13 +370,14 @@ def send_mms_via_adb(participants: list[str], text: str) -> bool:
 
     try:
         # Step 1: Open Google Messages with pre-filled recipients + body
-        rc1, out1 = adb(
-            "shell", "am", "start",
-            "-a", "android.intent.action.SENDTO",
-            "-d", f"mmsto:{recipients_str}",
-            "--es", "sms_body", text[:160],
-            timeout=8
+        # Must pass as single shell string — list args cause + and spaces to be misinterpreted
+        safe_text = text[:160].replace('"', '\\"').replace("'", "\\'")
+        am_cmd = (
+            f'am start -a android.intent.action.SENDTO '
+            f'-d "mmsto:{recipients_str}" '
+            f'--es sms_body "{safe_text}"'
         )
+        rc1, out1 = adb("shell", am_cmd, timeout=8)
         if rc1 != 0:
             log.error(f"send_mms SENDTO failed: {out1}")
             return False
