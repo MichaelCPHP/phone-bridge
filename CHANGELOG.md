@@ -1,5 +1,14 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — Route SMS exclusively to Jarvis session
+
+**Author:** Friday
+
+- mac_bridge.py: model changed to openclaw:jarvis (targets agent:jarvis:main only)
+- No more Builder/Friday agents intercepting SMS replies
+- Verified: openclaw:jarvis responds correctly
+
+
 ## 2026-03-10 — Fix AI persona in mac_bridge.py
 
 **Author:** Friday

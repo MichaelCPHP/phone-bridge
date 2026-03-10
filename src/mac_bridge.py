@@ -56,37 +56,49 @@ _lock = threading.Lock()
 
 # ── AI ────────────────────────────────────────────────────────────────────────
 
-def get_ai_reply(sender: str, text: str) -> Optional[str]:
-    """Get Claude reply via OpenClaw gateway, maintaining per-sender history."""
-    import requests
-    with _lock:
-        history = _histories.get(sender, [])
+JARVIS_SESSION = os.getenv("JARVIS_SESSION", "agent:jarvis:main")
 
-    messages = [
-        {"role": "system", "content": (
-            "You are a helpful AI phone assistant. "
-            "Your name is Assistant. You have no other identity or role. "
-            "Reply in plain text only, 1-2 sentences, under 160 characters. "
-            "No markdown, no bullet points, no role descriptions."
-        )}
-    ] + history + [{"role": "user", "content": text}]
+
+def get_ai_reply(sender: str, text: str) -> Optional[str]:
+    """Get reply via Jarvis session exclusively.
+    
+    Uses openclaw sessions_send to route to agent:jarvis:main only.
+    No other agents will respond.
+    """
+    import requests, re
+
+    prompt = (
+        f"[SMS from {sender}]: {text}\n\n"
+        f"Reply via SMS — plain text only, 1-2 sentences, under 160 characters. "
+        f"No markdown. No preamble. Just the reply text."
+    )
 
     try:
+        # Route to Jarvis session specifically via OpenClaw sessions API
         r = requests.post(
             f"{OPENCLAW_URL}/v1/chat/completions",
             headers={"Authorization": f"Bearer {OPENCLAW_TOKEN}",
                      "Content-Type": "application/json"},
-            json={"model": AI_MODEL, "max_tokens": 150, "messages": messages},
-            timeout=30,
+            json={
+                "model": "openclaw:jarvis",   # targets agent:jarvis:main session
+                "max_tokens": 150,
+                "messages": [
+                    {"role": "system", "content": (
+                        "You are Jarvis, an AI phone assistant. "
+                        "Reply in plain text only, 1-2 sentences, under 160 characters. "
+                        "No markdown. No bullet points. Just the reply."
+                    )},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=35,
         )
         r.raise_for_status()
         reply = r.json()["choices"][0]["message"]["content"].strip()
-        with _lock:
-            h = _histories.get(sender, [])
-            h = h + [{"role": "user", "content": text},
-                     {"role": "assistant", "content": reply}]
-            _histories[sender] = h[-20:]
-        return reply
+        # Strip markdown
+        reply = re.sub(r'\*+', '', reply)
+        reply = re.sub(r'#+\s*', '', reply)
+        return reply[:160]
     except Exception as e:
         log.error(f"AI error: {e}")
         return None
