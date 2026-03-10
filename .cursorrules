@@ -1,0 +1,15 @@
+# Phone Bridge Project
+
+## Project
+Android-to-AI phone bridge. Outbound/inbound calls + SMS with AI voice at low latency.
+
+## Stack
+- Node.js / Python (TBD after research)
+- VoiceBox (Docker) for TTS/STT
+- Android bridge (ADB or app)
+- Claude for AI conversation
+
+## Rules
+- Commit after every working milestone
+- Keep latency as the #1 constraint for voice
+- Document all Android bridge findings in /docs/research/

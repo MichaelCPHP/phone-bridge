@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "openclaw-workspace": {
+      "command": "node",
+      "args": [
+        "/Users/michaeltgcm/.cursor/extensions/openclaw.openclaw-vscode-0.1.0/dist/mcp-server.js",
+        "/Volumes/T9 Drive 1/projects/phone-bridge"
+      ]
+    }
+  }
+}

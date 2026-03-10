@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "afterFileEdit": {
+      "command": "/Volumes/T9 Drive 1/projects/phone-bridge/.cursor/hooks/afterFileEdit.sh"
+    },
+    "stop": {
+      "command": "/Volumes/T9 Drive 1/projects/phone-bridge/.cursor/hooks/stop.sh"
+    }
+  }
+}
