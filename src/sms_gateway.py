@@ -78,7 +78,10 @@ def get_ai_reply(sender: str, text: str) -> str | None:
             ["openclaw", "agent", "--agent", "jarvis", "--message", prompt],
             capture_output=True, text=True, timeout=60, env=env
         )
-        reply = result.stdout.strip()
+        raw = result.stdout.strip()
+        # Strip genesis-bridge header lines (e.g. "[genesis-bridge] v1.2 loaded for agent: friday")
+        lines = [l for l in raw.splitlines() if not l.startswith("[genesis-bridge]") and not l.startswith("[openclaw]")]
+        reply = "\n".join(lines).strip()
         if not reply:
             log.warning(f"Empty reply from openclaw agent, stderr: {result.stderr[:100]}")
             return None
