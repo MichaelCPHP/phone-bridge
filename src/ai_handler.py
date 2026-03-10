@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Phone Bridge — AI conversation layer (Issue #16)
+Phone Bridge — AI conversation layer
 
-AI backend: OpenClaw gateway (localhost:18789, OpenAI-compatible).
-            Swap OPENCLAW_MODEL=llama3.2 to use Ollama offline instead.
+AI backend: Ollama (local, no API key) at localhost:11434
 STT:        stt_voicebox.py (whisper-cpp primary)
 TTS:        tts_kokoro.py (Kokoro 82M, local, no API key)
 
@@ -12,76 +11,46 @@ Flow:
   Voice: Asterisk AGI → stt_voicebox → handle_call_turn() → tts_kokoro → Asterisk
 """
 
-import os, sys, logging
+import os, sys, logging, requests
 from pathlib import Path
 
 log = logging.getLogger("ai-handler")
 
-# ── AI backend — OpenClaw gateway (default) or Ollama (set OPENCLAW_GATEWAY_URL) ──
-OPENCLAW_GATEWAY_URL   = os.getenv("OPENCLAW_GATEWAY_URL",   "http://localhost:18789")
-OPENCLAW_GATEWAY_TOKEN = os.getenv("OPENCLAW_GATEWAY_TOKEN", "")
-OPENCLAW_MODEL         = os.getenv("OPENCLAW_MODEL",         "openclaw:friday")
-MAX_TOKENS             = int(os.getenv("AI_MAX_TOKENS",      "256"))
+OLLAMA_URL  = os.getenv("OLLAMA_URL",  "http://localhost:11434")
+AI_MODEL    = os.getenv("AI_MODEL",    "llama3.2")
+MAX_TOKENS  = int(os.getenv("AI_MAX_TOKENS", "256"))
 
 SYSTEM_PROMPT = """You are a helpful AI assistant answering calls and SMS on behalf of the phone owner.
 Be concise and natural. 1-3 sentences for SMS, conversational length for calls.
 If asked who you are: say you're an AI assistant managing calls and messages."""
 
 
-def get_client():
-    """OpenAI-compatible client — works with OpenClaw gateway AND Ollama."""
-    try:
-        from openai import OpenAI
-    except ImportError:
-        raise RuntimeError("Run: pip install openai")
-
-    # Ollama mode: no auth needed
-    if "11434" in OPENCLAW_GATEWAY_URL:
-        return OpenAI(base_url=f"{OPENCLAW_GATEWAY_URL.rstrip('/')}/v1", api_key="ollama")
-
-    if not OPENCLAW_GATEWAY_TOKEN:
-        raise ValueError(
-            "OPENCLAW_GATEWAY_TOKEN not set.\n"
-            "Get from Cursor settings (openclaw.gatewayToken) and add to .env"
-        )
-    return OpenAI(
-        base_url=f"{OPENCLAW_GATEWAY_URL.rstrip('/')}/v1",
-        api_key=OPENCLAW_GATEWAY_TOKEN,
-    )
-
-
-def respond(user_message: str, context: str = "sms", history: list | None = None) -> str:
-    """
-    Generate an AI response.
-
-    Args:
-        user_message: Incoming text (SMS or voice transcript)
-        context:      "sms" or "voice"
-        history:      Prior conversation [{"role": ..., "content": ...}]
-
-    Returns: Response text string
-    """
-    client = get_client()
+def respond(user_message: str, context: str = "sms", history: list = None) -> str:
+    """Generate an AI response via Ollama."""
     messages = list(history or [])
-    messages.append({"role": "user", "content": user_message})
-
     system = SYSTEM_PROMPT
     if context == "voice":
-        system += "\nYou are speaking aloud — no markdown, no lists."
+        system += "\nYou are speaking aloud — no markdown, no lists, plain conversational sentences only."
 
-    resp = client.chat.completions.create(
-        model=OPENCLAW_MODEL,
-        max_tokens=MAX_TOKENS,
-        messages=[{"role": "system", "content": system}] + messages,
-    )
-    reply = resp.choices[0].message.content.strip()
+    payload = {
+        "model": AI_MODEL,
+        "messages": [{"role": "system", "content": system}] + messages + [
+            {"role": "user", "content": user_message}
+        ],
+        "stream": False,
+        "options": {"num_predict": MAX_TOKENS},
+    }
+
+    r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=45)
+    r.raise_for_status()
+    reply = r.json()["message"]["content"].strip()
     log.info(f"[{context}] {user_message[:60]!r} → {reply[:60]!r}")
     return reply
 
 
 # ─── SMS handler ──────────────────────────────────────────────────────────────
 
-_sms_history: dict[str, list] = {}
+_sms_history: dict = {}
 
 def handle_sms(phone_number: str, message: str) -> str:
     """Process inbound SMS and return reply text."""
@@ -94,10 +63,10 @@ def handle_sms(phone_number: str, message: str) -> str:
 
 # ─── Voice / Asterisk AGI handler ────────────────────────────────────────────
 
-_call_history: dict[str, list] = {}
+_call_history: dict = {}
 
 def handle_call_turn(transcript: str, call_id: str) -> str:
-    """Process one voice turn. Called by run_agi() after each utterance."""
+    """Process one voice turn. Called after each utterance."""
     history = _call_history.get(call_id, [])
     reply = respond(transcript, context="voice", history=history)
     history += [{"role": "user", "content": transcript}, {"role": "assistant", "content": reply}]
@@ -114,8 +83,8 @@ def run_agi():
     extensions.conf:
       exten => _X.,1,AGI(ai_handler.py,agi)
     """
-    from stt_voicebox import transcribe_audio_file   # whisper-cpp primary
-    from tts_kokoro   import synthesize_for_asterisk  # Kokoro — no cloud, no 'say'
+    from stt_voicebox import transcribe_audio_file
+    from tts_kokoro   import synthesize_for_asterisk
 
     agi_vars = {}
     while True:
@@ -163,9 +132,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "agi":
         run_agi()
     else:
-        print(f"AI backend : {OPENCLAW_GATEWAY_URL}")
-        print(f"Model      : {OPENCLAW_MODEL}")
-        print(f"Token set  : {'yes' if OPENCLAW_GATEWAY_TOKEN else 'NO — set OPENCLAW_GATEWAY_TOKEN in .env'}")
+        print(f"AI backend : {OLLAMA_URL}")
+        print(f"Model      : {AI_MODEL}")
         print()
         try:
             reply = handle_sms("+15555550100", "Hey, are you free for a call tomorrow?")
