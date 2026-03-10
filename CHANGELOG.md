@@ -57,3 +57,38 @@ No Docker required. Phone serves REST API at http://<phone-ip>:8080.
 - Install Linphone on Android, register with Mac's local IP, user: android-phone
 
 ---
+
+## 2026-03-09 — Issue #10: Deepgram STT pipeline
+
+**Author:** Friday  
+**Type:** Feature
+
+### Changes
+- `src/stt_deepgram.py`:
+  - `transcribe_audio_file()` — batch transcription of WAV/PCM files
+  - `transcribe_stream()` — async streaming STT for live call audio
+  - `test_connection()` — validates DEEPGRAM_API_KEY
+- Config: nova-2 model, 8kHz (Asterisk format), 300ms endpointing
+
+### Next
+- Set `DEEPGRAM_API_KEY` env var and run to validate
+
+---
+
+## 2026-03-09 — Issue #11: ElevenLabs TTS pipeline
+
+**Author:** Friday  
+**Type:** Feature
+
+### Changes
+- `src/tts_elevenlabs.py`:
+  - `synthesize()` — text → MP3 via ElevenLabs turbo model (~200-400ms)
+  - `synthesize_for_asterisk()` — converts to 8kHz μ-law WAV via ffmpeg
+  - `list_voices()` — enumerate available voices
+  - `test_connection()` — validates ELEVENLABS_API_KEY
+- Model: `eleven_turbo_v2` (lowest latency)
+
+### Next
+- Set `ELEVENLABS_API_KEY` env var, pick voice ID, run test
+
+---
