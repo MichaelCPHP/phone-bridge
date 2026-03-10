@@ -35,7 +35,7 @@ def send_sms(phone_number: str, message: str) -> dict:
     """Send SMS via android-sms-gateway REST API."""
     try:
         resp = requests.post(
-            f"{BASE_URL}/api/3rdparty/v1/message",
+            f"{BASE_URL}/messages",  # local server: /messages works, not /api/3rdparty/v1/message
             auth=AUTH,
             json={"message": message, "phoneNumbers": [phone_number]},
             timeout=10,
@@ -49,52 +49,35 @@ def send_sms(phone_number: str, message: str) -> dict:
 
 
 def route_to_jarvis(sender: str, message: str, channel: str = "SMS") -> str:
-    """Route message to Jarvis session via OpenClaw sessions API and get reply."""
+    """Route message to Jarvis agent via `openclaw agent` CLI and return reply."""
+    prompt = f"[Inbound {channel} from {sender}]: {message}\n\nReply concisely (1-3 sentences for SMS). Do not include any preamble."
     try:
-        prompt = f"[Inbound {channel} from {sender}]: {message}"
-        resp = requests.post(
-            f"{OPENCLAW_URL}/api/sessions/{JARVIS_SESSION}/send",
-            headers={"Authorization": f"Bearer {OPENCLAW_TOKEN}"},
-            json={"message": prompt},
-            timeout=60,
+        result = subprocess.run(
+            ["openclaw", "agent", "--agent", "jarvis", "--message", prompt, "--json"],
+            capture_output=True, text=True, timeout=90,
+            env={**os.environ, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
         )
-        if resp.status_code == 200:
-            data = resp.json()
-            reply = data.get("reply") or data.get("response") or data.get("message", "")
-            if reply:
-                log.info(f"Jarvis replied: {reply[:80]}")
-                return reply
+        if result.returncode == 0 and result.stdout.strip():
+            try:
+                data = json.loads(result.stdout.strip())
+                reply = data.get("reply") or data.get("response") or data.get("content") or data.get("message", "")
+                if reply:
+                    log.info(f"Jarvis replied via CLI: {reply[:80]}")
+                    return reply
+            except json.JSONDecodeError:
+                # Plain text output
+                reply = result.stdout.strip()
+                if reply and len(reply) > 5:
+                    log.info(f"Jarvis replied (plain): {reply[:80]}")
+                    return reply
+        if result.stderr:
+            log.warning(f"openclaw agent stderr: {result.stderr[:200]}")
+    except subprocess.TimeoutExpired:
+        log.error("openclaw agent timed out")
     except Exception as e:
-        log.warning(f"sessions API failed: {e}, falling back to direct LLM")
+        log.error(f"openclaw agent CLI failed: {e}")
 
-    # Fallback: direct LLM call with Jarvis identity
-    try:
-        resp = requests.post(
-            f"{OPENCLAW_URL}/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENCLAW_TOKEN}",
-                "Content-Type": "application/json",
-                "X-Agent-Id": "jarvis",
-            },
-            json={
-                "model": "anthropic/claude-sonnet-4-5",
-                "messages": [
-                    {"role": "system", "content": (
-                        "You are Jarvis, Michael's personal AI phone assistant. "
-                        "You handle Michael's SMS and calls. Be concise (1-3 sentences for SMS). "
-                        "If asked who you are: Jarvis, Michael's AI phone assistant."
-                    )},
-                    {"role": "user", "content": message},
-                ],
-                "max_tokens": 200,
-            },
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"].strip()
-    except Exception as e:
-        log.error(f"LLM fallback failed: {e}")
-        return "Hey! I'm Jarvis, Michael's assistant. Got your message — will pass it along."
+    return "Hey! I'm Jarvis, Michael's AI phone assistant. Got your message!"
 
 
 @app.route("/health", methods=["GET"])
