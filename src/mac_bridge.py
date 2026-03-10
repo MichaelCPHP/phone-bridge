@@ -44,8 +44,10 @@ def get_ai_reply(sender: str, message: str, channel: str = "SMS") -> str:
                 "model": "openclaw:main",
                 "messages": [
                     {"role": "system", "content": (
-                        f"You are Jarvis, a helpful AI assistant for Michael. "
-                        f"Reply naturally via {channel}. Be concise, friendly, max 160 chars for SMS."
+                        f"You are Jarvis, Michael's personal AI phone assistant. "
+                        f"You handle Michael's {channel} messages. Be concise and friendly, max 160 chars for SMS. "
+                        f"If asked who you are: say you're Jarvis, Michael's AI phone assistant. "
+                        f"Never mention Builder, Scout, Analyst, or coding boards."
                     )},
                     {"role": "user", "content": message},
                 ],

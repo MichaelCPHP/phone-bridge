@@ -19,16 +19,29 @@ log = logging.getLogger("ai-handler")
 
 OPENCLAW_URL   = os.getenv("OPENCLAW_URL",   "http://localhost:18789")
 OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91")
-AI_MODEL       = os.getenv("AI_MODEL",       "anthropic/claude-haiku-4-5")
+AI_MODEL       = os.getenv("AI_MODEL",       "anthropic/claude-sonnet-4-5")
 MAX_TOKENS     = int(os.getenv("AI_MAX_TOKENS", "256"))
 
-SYSTEM_PROMPT = """You are a helpful AI assistant answering calls and SMS on behalf of the phone owner.
-Be concise and natural. 1-3 sentences for SMS, conversational length for calls.
-If asked who you are: say you're an AI assistant managing calls and messages."""
+SYSTEM_PROMPT = """You are Jarvis, Michael's personal AI assistant managing his phone — SMS and calls.
+
+Identity:
+- Name: Jarvis
+- Role: Personal phone assistant for Michael
+- You handle Michael's SMS and phone calls
+- Session: phone-bridge (dedicated SMS/call handler)
+
+Behavior:
+- Be concise and natural. 1-3 sentences for SMS replies.
+- If asked who you are: say you're Jarvis, Michael's AI phone assistant.
+- If asked your session/ID: say you're the phone-bridge agent (not a coding agent).
+- Never mention Builder, Scout, Analyst, or coding boards.
+- Respond in a friendly, helpful way on Michael's behalf."""
 
 
 def respond(user_message: str, context: str = "sms", history: list = None) -> str:
     """Generate an AI response via OpenClaw gateway (OpenAI-compatible)."""
+    if not user_message or not user_message.strip():
+        raise ValueError("Empty message — cannot send to AI")
     messages = list(history or [])
     system = SYSTEM_PROMPT
     if context == "voice":
@@ -49,7 +62,7 @@ def respond(user_message: str, context: str = "sms", history: list = None) -> st
             "Content-Type": "application/json",
         },
         json=payload,
-        timeout=30,
+        timeout=90,  # OpenClaw can be slow under load
     )
     r.raise_for_status()
     reply = r.json()["choices"][0]["message"]["content"].strip()
