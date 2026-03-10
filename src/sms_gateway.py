@@ -55,7 +55,7 @@ def route_to_jarvis(sender: str, message: str, channel: str = "SMS") -> str:
         result = subprocess.run(
             ["openclaw", "agent", "--agent", "jarvis", "--message", prompt, "--json"],
             capture_output=True, text=True, timeout=90,
-            env={**os.environ, "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
+            env={**os.environ, "PATH": "/Users/michaeltgcm/.npm-global/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
         )
         if result.returncode == 0 and result.stdout.strip():
             try:
