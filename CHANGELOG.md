@@ -92,3 +92,23 @@ No Docker required. Phone serves REST API at http://<phone-ip>:8080.
 - Set `ELEVENLABS_API_KEY` env var, pick voice ID, run test
 
 ---
+
+## 2026-03-09 — Issue #12: Claude Haiku AI layer
+
+**Author:** Friday  
+**Type:** Feature
+
+### Changes
+- `src/ai_handler.py` (199 lines):
+  - `respond()` — Claude Haiku call with SMS/voice context
+  - `handle_sms()` — SMS conversation handler with per-number history
+  - `handle_call_turn()` — voice conversation handler with per-call history
+  - `run_agi()` — Asterisk AGI script (record → STT → AI → TTS → speak loop)
+- `src/sms_gateway.py` updated — AI stub replaced with real `ai_handler.handle_sms()` call
+- Model: `claude-haiku-4-5`, 256 max tokens (low latency)
+
+### Integration
+- SMS path: webhook → handle_sms() → Claude Haiku → send reply
+- Voice path: Asterisk AGI → record → Deepgram STT → handle_call_turn() → ElevenLabs TTS → playback
+
+---

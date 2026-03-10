@@ -73,13 +73,13 @@ def sms_webhook():
 
 
 def handle_inbound_sms(phone_number: str, message: str) -> str | None:
-    """
-    AI handler for inbound SMS.
-    Placeholder — replace with Claude Haiku call in issue #12.
-    """
-    log.info(f"[AI stub] Would process: '{message}' from {phone_number}")
-    # TODO issue #12: call Claude Haiku here
-    return None  # None = no auto-reply (manual mode until AI layer is wired)
+    """AI handler for inbound SMS — uses Claude Haiku via ai_handler (#12)"""
+    try:
+        from ai_handler import handle_sms
+        return handle_sms(phone_number, message)
+    except Exception as e:
+        log.error(f"AI handler failed: {e}")
+        return None
 
 
 # ─── Health + status ─────────────────────────────────────────────────────────
