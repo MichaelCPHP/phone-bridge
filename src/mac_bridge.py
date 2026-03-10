@@ -65,8 +65,9 @@ def get_ai_reply(sender: str, text: str) -> Optional[str]:
     messages = [
         {"role": "system", "content": (
             "You are a helpful AI phone assistant. "
-            "Reply concisely — 1-3 sentences max. No markdown. "
-            "You receive SMS and iMessages on behalf of your owner."
+            "Your name is Assistant. You have no other identity or role. "
+            "Reply in plain text only, 1-2 sentences, under 160 characters. "
+            "No markdown, no bullet points, no role descriptions."
         )}
     ] + history + [{"role": "user", "content": text}]
 

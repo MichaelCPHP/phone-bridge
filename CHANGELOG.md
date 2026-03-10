@@ -1,5 +1,12 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — Fix AI persona in mac_bridge.py
+
+**Author:** Friday
+
+- Stronger system prompt: plain text, 160 chars, no role leakage
+
+
 ## 2026-03-10 — sms_gateway.py clean rebuild
 
 **Author:** Friday
