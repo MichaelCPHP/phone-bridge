@@ -80,13 +80,13 @@ def get_ai_reply(sender: str, text: str) -> Optional[str]:
             headers={"Authorization": f"Bearer {OPENCLAW_TOKEN}",
                      "Content-Type": "application/json"},
             json={
-                "model": "openclaw:jarvis",   # targets agent:jarvis:main session
+                "model": "anthropic/claude-haiku-4-5",
                 "max_tokens": 150,
                 "messages": [
                     {"role": "system", "content": (
-                        "You are Jarvis, an AI phone assistant. "
+                        "You are a helpful AI phone assistant. "
                         "Reply in plain text only, 1-2 sentences, under 160 characters. "
-                        "No markdown. No bullet points. Just the reply."
+                        "No markdown. No bullet points. Just the reply text."
                     )},
                     {"role": "user", "content": prompt},
                 ],
@@ -266,16 +266,86 @@ def get_max_sms_id() -> int:
     return max_id
 
 
+def get_max_mms_id() -> int:
+    rc, out = adb("shell", "content", "query", "--uri", "content://mms", timeout=10)
+    if rc != 0:
+        return 0
+    max_id = 0
+    for line in out.split('\n'):
+        if not line.strip().startswith("Row:"):
+            continue
+        m = re.search(r'\b_id=(\d+)', line)
+        if m:
+            max_id = max(max_id, int(m.group(1)))
+    return max_id
+
+
+def get_mms_text(mms_id: int) -> str:
+    """Get text body from MMS message parts."""
+    rc, out = adb("shell", "content", "query", "--uri", f"content://mms/{mms_id}/part", timeout=10)
+    if rc != 0:
+        return ""
+    for line in out.split('\n'):
+        if 'text=' in line and 'ct=text/plain' in line:
+            m = re.search(r'text=(.+?)(?:,\s*\w+=|$)', line)
+            if m:
+                return m.group(1).strip()
+    return ""
+
+
+def get_mms_sender(mms_id: int) -> str:
+    """Get sender address from MMS message (type=137 = FROM)."""
+    rc, out = adb("shell", "content", "query", "--uri", f"content://mms/{mms_id}/addr", timeout=10)
+    if rc != 0:
+        return ""
+    for line in out.split('\n'):
+        if 'type=137' in line:  # 137 = FROM address
+            m = re.search(r'address=([^,]+)', line)
+            if m:
+                addr = m.group(1).strip()
+                if addr and addr != 'insert-address-token':
+                    return addr
+    return ""
+
+
+def get_mms_since(last_id: int) -> list[dict]:
+    """Read new inbound MMS/group messages since last_id."""
+    rc, out = adb("shell", "content", "query", "--uri", "content://mms", timeout=10)
+    if rc != 0:
+        return []
+    msgs = []
+    for line in out.split('\n'):
+        line = line.strip()
+        if not line.startswith("Row:"):
+            continue
+        _, _, rest = line.partition(' ')
+        _, _, rest = rest.partition(' ')
+        parts = re.split(r',\s*(?=\w+=)', rest)
+        m = {}
+        for p in parts:
+            if '=' in p:
+                k, _, v = p.partition('=')
+                m[k.strip()] = v.strip()
+        mid = int(m.get('_id', 0))
+        msg_box = m.get('msg_box', '0')
+        if mid > last_id and msg_box == '1':  # msg_box=1 = inbound
+            msgs.append(m)
+    msgs.sort(key=lambda x: int(x.get('_id', 0)))
+    return msgs
+
+
 def poll_adb_sms() -> None:
-    """Poll content://sms via ADB for new inbound SMS (fallback for non-Apple senders)."""
-    log.info("Starting ADB SMS poller...")
-    last_id = get_max_sms_id()
-    log.info(f"✅ ADB poll: watermark id={last_id}")
+    """Poll content://sms and content://mms for new inbound messages."""
+    log.info("Starting ADB SMS+MMS poller...")
+    last_sms_id = get_max_sms_id()
+    last_mms_id = get_max_mms_id()
+    log.info(f"✅ ADB poll: SMS watermark={last_sms_id}, MMS watermark={last_mms_id}")
 
     while True:
         time.sleep(POLL_INTERVAL)
         try:
-            new_msgs = get_sms_since(last_id)
+            # Poll SMS
+            new_msgs = get_sms_since(last_sms_id)
             for m in new_msgs:
                 mid    = int(m.get('_id', 0))
                 sender = m.get('address', '')
@@ -283,7 +353,7 @@ def poll_adb_sms() -> None:
                 ts_ms  = int(m.get('date', 0))
                 ts     = datetime.fromtimestamp(ts_ms / 1000).strftime('%H:%M:%S')
 
-                last_id = max(last_id, mid)
+                last_sms_id = max(last_sms_id, mid)
 
                 if not text:
                     continue
@@ -292,6 +362,28 @@ def poll_adb_sms() -> None:
                 reply = get_ai_reply(sender, text)
                 if not reply:
                     log.warning("No AI reply")
+                    continue
+                log.info(f"  ↳ AI: {reply[:80]}")
+                send_sms_gateway(sender, reply)
+
+            # Poll MMS (group texts)
+            new_mms = get_mms_since(last_mms_id)
+            for m in new_mms:
+                mid  = int(m.get('_id', 0))
+                last_mms_id = max(last_mms_id, mid)
+
+                text   = get_mms_text(mid)
+                sender = get_mms_sender(mid)
+                ts_ms  = int(m.get('date', 0))
+                ts     = datetime.fromtimestamp(ts_ms / 1000).strftime('%H:%M:%S')
+
+                if not text or not sender:
+                    continue
+
+                log.info(f"📨 ADB [{ts}] MMS/Group from {sender}: {text[:60]}")
+                reply = get_ai_reply(sender, text)
+                if not reply:
+                    log.warning("No AI reply for MMS")
                     continue
                 log.info(f"  ↳ AI: {reply[:80]}")
                 send_sms_gateway(sender, reply)

@@ -1,5 +1,14 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — MMS/group text support + fix openclaw:jarvis routing
+
+**Author:** Friday
+
+- mac_bridge.py: added MMS poll (content://mms) for group text messages
+- Group text body from content://mms/{id}/part, sender from type=137 addr
+- Reverted model to anthropic/claude-haiku-4-5 (openclaw:jarvis pointed to wrong session)
+
+
 ## 2026-03-10 — Route SMS exclusively to Jarvis session
 
 **Author:** Friday
