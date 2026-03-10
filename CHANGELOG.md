@@ -1,5 +1,14 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — Group MMS reply to all participants
+
+**Author:** Friday
+
+- mac_bridge.py: get all group participants from mms/{id}/addr
+- Reply sent to all participants via gateway multi-recipient API
+- Excludes own Android number from recipient list
+
+
 ## 2026-03-10 — MMS/group text support + fix openclaw:jarvis routing
 
 **Author:** Friday

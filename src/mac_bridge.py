@@ -308,6 +308,44 @@ def get_mms_sender(mms_id: int) -> str:
     return ""
 
 
+def get_mms_all_participants(mms_id: int) -> list[str]:
+    """Get all participant addresses from MMS message (type=130 = TO recipients)."""
+    rc, out = adb("shell", "content", "query", "--uri", f"content://mms/{mms_id}/addr", timeout=10)
+    if rc != 0:
+        return []
+    participants = []
+    for line in out.split('\n'):
+        if 'type=130' in line or 'type=137' in line:  # 130=TO, 137=FROM
+            m = re.search(r'address=([^,]+)', line)
+            if m:
+                addr = m.group(1).strip()
+                # Exclude our own Android number and invalid tokens
+                if addr and addr not in ('insert-address-token', MY_ANDROID, '+17029469526', '+17029649526'):
+                    if addr not in participants:
+                        participants.append(addr)
+    return participants
+
+
+def send_group_reply(participants: list[str], text: str) -> bool:
+    """Send reply to all group participants via gateway API."""
+    import requests
+    if not participants:
+        return False
+    try:
+        r = requests.post(
+            f"http://{PHONE_IP}:{PHONE_PORT}/messages",
+            auth=(SMS_USER, SMS_PASS),
+            json={"message": text[:160], "phoneNumbers": participants},
+            timeout=10,
+        )
+        r.raise_for_status()
+        log.info(f"Group reply → {participants}: queued")
+        return True
+    except Exception as e:
+        log.error(f"send_group_reply error: {e}")
+        return False
+
+
 def get_mms_since(last_id: int) -> list[dict]:
     """Read new inbound MMS/group messages since last_id."""
     rc, out = adb("shell", "content", "query", "--uri", "content://mms", timeout=10)
@@ -372,21 +410,26 @@ def poll_adb_sms() -> None:
                 mid  = int(m.get('_id', 0))
                 last_mms_id = max(last_mms_id, mid)
 
-                text   = get_mms_text(mid)
-                sender = get_mms_sender(mid)
-                ts_ms  = int(m.get('date', 0))
-                ts     = datetime.fromtimestamp(ts_ms / 1000).strftime('%H:%M:%S')
+                text         = get_mms_text(mid)
+                sender       = get_mms_sender(mid)
+                participants = get_mms_all_participants(mid)
+                ts_ms        = int(m.get('date', 0))
+                ts           = datetime.fromtimestamp(ts_ms / 1000).strftime('%H:%M:%S')
 
                 if not text or not sender:
                     continue
 
-                log.info(f"📨 ADB [{ts}] MMS/Group from {sender}: {text[:60]}")
+                log.info(f"📨 ADB [{ts}] MMS/Group from {sender} (participants: {participants}): {text[:60]}")
                 reply = get_ai_reply(sender, text)
                 if not reply:
                     log.warning("No AI reply for MMS")
                     continue
                 log.info(f"  ↳ AI: {reply[:80]}")
-                send_sms_gateway(sender, reply)
+                # Reply to all group participants
+                if participants:
+                    send_group_reply(participants, reply)
+                else:
+                    send_sms_gateway(sender, reply)
 
         except Exception as e:
             log.error(f"ADB poll error: {e}")
