@@ -88,7 +88,7 @@ def imsg_watcher():
             log.warning("iMessage watcher disabled — grant Full Disk Access to Terminal in System Settings")
             return
 
-        chats = json.loads(result.stdout or "[]")
+        chats = [json.loads(line) for line in (result.stdout or "").strip().splitlines() if line.strip()]
         # Track last message ID per chat
         last_ids: dict = {}
         for chat in chats:
@@ -107,7 +107,7 @@ def imsg_watcher():
                     )
                     if hist.returncode != 0:
                         continue
-                    messages = json.loads(hist.stdout or "[]")
+                    messages = [json.loads(line) for line in (hist.stdout or "").strip().splitlines() if line.strip()]
                     for msg in messages:
                         msg_id = msg.get("messageId") or msg.get("id")
                         is_from_me = msg.get("isFromMe", False)
@@ -150,7 +150,7 @@ def gateway_sms_poller():
         try:
             # Get recent messages
             resp = httpx.get(
-                f"{GATEWAY_URL}/api/3rdparty/v1/messages",
+                f"{GATEWAY_URL}/api/v1/messages",
                 auth=(GATEWAY_USER, GATEWAY_PASS),
                 timeout=10,
             )
