@@ -1,5 +1,15 @@
 # Phone Bridge Changelog
 
+## 2026-03-10 — iMessage group chat reply via chat_id
+
+**Author:** Friday
+
+- send_imessage_to_chat(chat_id): replies into existing thread via --chat-id
+- handle_imsg_message: always use chat_id when present (1:1 and group)
+- Validated: imsg send --chat-id works for both 1:1 and group threads
+- Research confirmed: gateway cannot do group MMS; imsg --chat-id is correct path
+
+
 ## 2026-03-10 — Group MMS reply to all participants
 
 **Author:** Friday

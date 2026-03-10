@@ -107,7 +107,7 @@ def get_ai_reply(sender: str, text: str) -> Optional[str]:
 # ── iMessage send ─────────────────────────────────────────────────────────────
 
 def send_imessage(to: str, text: str, service: str = "auto") -> bool:
-    """Send iMessage or SMS via imsg CLI."""
+    """Send iMessage or SMS to individual via imsg CLI."""
     try:
         result = subprocess.run(
             [IMSG_BIN, "send", "--to", to, "--text", text, "--service", service],
@@ -120,6 +120,23 @@ def send_imessage(to: str, text: str, service: str = "auto") -> bool:
         return False
     except Exception as e:
         log.error(f"imsg send error: {e}")
+        return False
+
+
+def send_imessage_to_chat(chat_id: int, text: str) -> bool:
+    """Reply into an existing iMessage chat thread (group or 1:1) by chat_id."""
+    try:
+        result = subprocess.run(
+            [IMSG_BIN, "send", "--chat-id", str(chat_id), "--text", text],
+            capture_output=True, text=True, timeout=15
+        )
+        if result.returncode == 0:
+            log.info(f"imsg chat-id={chat_id}: sent")
+            return True
+        log.error(f"imsg send --chat-id failed: {result.stderr.strip()}")
+        return False
+    except Exception as e:
+        log.error(f"imsg send_to_chat error: {e}")
         return False
 
 
@@ -174,22 +191,31 @@ def handle_imsg_message(msg: dict) -> None:
     if msg.get("is_from_me") or msg.get("isFromMe"):
         return
 
-    sender = msg.get("sender") or msg.get("handle") or msg.get("address") or ""
-    text   = msg.get("text") or msg.get("body") or ""
+    sender  = msg.get("sender") or msg.get("handle") or msg.get("address") or ""
+    text    = msg.get("text") or msg.get("body") or ""
     service = msg.get("service", "auto")
+    chat_id = msg.get("chat_id")  # present for both 1:1 and group chats
 
-    if not sender or not text:
+    if not text:
         return
 
-    log.info(f"📨 iMsg [{service}] from {sender}: {text[:60]}")
+    log.info(f"📨 iMsg [chat_id={chat_id}] from {sender}: {text[:60]}")
 
-    reply = get_ai_reply(sender, text)
+    reply = get_ai_reply(sender or f"chat{chat_id}", text)
     if not reply:
         log.warning("No AI reply")
         return
 
     log.info(f"  ↳ AI: {reply[:80]}")
-    send_reply(sender, reply, service=service)
+
+    # Always reply via chat_id if available — this handles both 1:1 and group
+    if chat_id:
+        if not send_imessage_to_chat(chat_id, reply):
+            # Fallback to --to if chat_id send fails and we have a sender
+            if sender:
+                send_reply(sender, reply, service=service)
+    elif sender:
+        send_reply(sender, reply, service=service)
 
 
 def watch_imessages() -> None:
