@@ -2,7 +2,8 @@
 """
 Phone Bridge — AI conversation layer
 
-AI backend: Ollama (local, no API key) at localhost:11434
+AI backend: OpenClaw gateway (localhost:18789, OpenAI-compatible)
+            Uses Anthropic Claude via your own OpenClaw instance.
 STT:        stt_voicebox.py (whisper-cpp primary)
 TTS:        tts_kokoro.py (Kokoro 82M, local, no API key)
 
@@ -16,19 +17,18 @@ from pathlib import Path
 
 log = logging.getLogger("ai-handler")
 
-OLLAMA_URL  = os.getenv("OLLAMA_URL",  "http://localhost:11434")
-AI_MODEL    = os.getenv("AI_MODEL",    "llama3.2")
-MAX_TOKENS  = int(os.getenv("AI_MAX_TOKENS", "256"))
+OPENCLAW_URL   = os.getenv("OPENCLAW_URL",   "http://localhost:18789")
+OPENCLAW_TOKEN = os.getenv("OPENCLAW_TOKEN", "dc890eadb3d33f24fde2ff929e138d1483b355d69f8e4b91")
+AI_MODEL       = os.getenv("AI_MODEL",       "anthropic/claude-haiku-4-5")
+MAX_TOKENS     = int(os.getenv("AI_MAX_TOKENS", "256"))
 
-SYSTEM_PROMPT = """You are a helpful AI assistant answering SMS messages and phone calls on behalf of Michael.
-Be concise, friendly, and natural. For SMS: 1-3 sentences max. For calls: conversational but brief.
-Do NOT use any agent-specific phrases like 'HEARTBEAT_OK', 'NO_REPLY', or similar internal signals.
-If asked who you are: you're Michael's AI assistant.
-If asked where Michael is or when he'll be available: say you'll pass along the message."""
+SYSTEM_PROMPT = """You are a helpful AI assistant answering calls and SMS on behalf of the phone owner.
+Be concise and natural. 1-3 sentences for SMS, conversational length for calls.
+If asked who you are: say you're an AI assistant managing calls and messages."""
 
 
 def respond(user_message: str, context: str = "sms", history: list = None) -> str:
-    """Generate an AI response via Ollama."""
+    """Generate an AI response via OpenClaw gateway (OpenAI-compatible)."""
     messages = list(history or [])
     system = SYSTEM_PROMPT
     if context == "voice":
@@ -36,16 +36,23 @@ def respond(user_message: str, context: str = "sms", history: list = None) -> st
 
     payload = {
         "model": AI_MODEL,
+        "max_tokens": MAX_TOKENS,
         "messages": [{"role": "system", "content": system}] + messages + [
             {"role": "user", "content": user_message}
         ],
-        "stream": False,
-        "options": {"num_predict": MAX_TOKENS},
     }
 
-    r = requests.post(f"{OLLAMA_URL}/api/chat", json=payload, timeout=45)
+    r = requests.post(
+        f"{OPENCLAW_URL}/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {OPENCLAW_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
     r.raise_for_status()
-    reply = r.json()["message"]["content"].strip()
+    reply = r.json()["choices"][0]["message"]["content"].strip()
     log.info(f"[{context}] {user_message[:60]!r} → {reply[:60]!r}")
     return reply
 
@@ -63,12 +70,12 @@ def handle_sms(phone_number: str, message: str) -> str:
     return reply
 
 
-# ─── Voice / Asterisk AGI handler ────────────────────────────────────────────
+# ─── Voice / call handler ─────────────────────────────────────────────────────
 
 _call_history: dict = {}
 
 def handle_call_turn(transcript: str, call_id: str) -> str:
-    """Process one voice turn. Called after each utterance."""
+    """Process one voice turn."""
     history = _call_history.get(call_id, [])
     reply = respond(transcript, context="voice", history=history)
     history += [{"role": "user", "content": transcript}, {"role": "assistant", "content": reply}]
@@ -79,12 +86,6 @@ def handle_call_turn(transcript: str, call_id: str) -> str:
 # ─── Asterisk AGI entry point ─────────────────────────────────────────────────
 
 def run_agi():
-    """
-    Called as Asterisk AGI script. Reads audio, transcribes, responds, speaks.
-
-    extensions.conf:
-      exten => _X.,1,AGI(ai_handler.py,agi)
-    """
     from stt_voicebox import transcribe_audio_file
     from tts_kokoro   import synthesize_for_asterisk
 
@@ -134,7 +135,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "agi":
         run_agi()
     else:
-        print(f"AI backend : {OLLAMA_URL}")
+        print(f"AI backend : {OPENCLAW_URL}")
         print(f"Model      : {AI_MODEL}")
         print()
         try:
@@ -142,8 +143,3 @@ if __name__ == "__main__":
             print(f"SMS reply  : {reply}")
         except Exception as e:
             print(f"❌ SMS test failed: {e}")
-        try:
-            reply = handle_call_turn("Hi, who am I speaking with?", "test-001")
-            print(f"Voice reply: {reply}")
-        except Exception as e:
-            print(f"❌ Voice test failed: {e}")
